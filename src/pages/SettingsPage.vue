@@ -17,6 +17,7 @@ import NumberSpinner from '../components/ui/NumberSpinner.vue';
 import EmptyRow from '../components/ui/EmptyRow.vue';
 import { inputCls } from '../components/ui/inputCls.js';
 import { STORAGE_PLACES, FONT_OPTIONS, PERMISSIONS } from '../lib/seed.js';
+import { convertQty, compatibleUnits, roundQty } from '../lib/units.js';
 import { useAppStore } from '../stores/app.js';
 
 const props = defineProps({
@@ -171,6 +172,7 @@ const bF = ref({
   phone: store.settings.phone || '',
   address: store.settings.address || '',
   charityName: store.settings.charityName || '',
+  currency: store.settings.currency || 'تومان',
 });
 const bSubmit = () => {
   store.settings = { ...store.settings, ...bF.value };
@@ -299,21 +301,41 @@ const rEditId = ref(null);
 
 const rIng = computed(() => store.ingredients.find((i) => i.id === rIngId.value) || null);
 
+// واحد مصرف در رسپی: پیش‌فرض واحد ماده؛ قابل تغییر به واحدهای هم‌خانواده (کیلوگرم ← گرم)
+const rUnitOptions = computed(() => (rIng.value ? compatibleUnits(store.units, rIng.value.unit).map((n) => ({ value: n, label: n, searchText: n })) : []));
+const rUnit = ref(''); // '' = واحد خود ماده
+const rEffUnit = computed(() => rUnit.value || rIng.value?.unit || '');
+const rConvPreview = computed(() => {
+  if (!rIng.value || rEffUnit.value === rIng.value.unit) return '';
+  const c = convertQty(store.units, Number(rQty.value) || 0, rEffUnit.value, rIng.value.unit);
+  if (c === null) return 'تبدیل تعریف نشده';
+  return `${toFa(Number(rQty.value) || 0)} ${rEffUnit.value} = ${toFa(roundQty(c))} ${rIng.value.unit}`;
+});
+
 const rAddItem = () => {
   if (!rIngId.value) return toast('انتخاب ماده غذایی الزامی است', 'error');
   const q = Number(rQty.value);
   if (!q || q <= 0) return toast('مقدار باید بیشتر از صفر باشد', 'error');
   const ing = rIng.value;
+  // تبدیل مقدار به واحد انبار ماده
+  let stockQty = q;
+  const useUnit = rEffUnit.value;
+  if (useUnit !== ing.unit) {
+    const c = convertQty(store.units, q, useUnit, ing.unit);
+    if (c === null) return toast(`تبدیل «${useUnit}» به «${ing.unit}» تعریف نشده است — ابتدا در تنظیمات، تبدیل واحد را تعریف کنید`, 'error');
+    stockQty = roundQty(c);
+  }
   const ex = rItems.value.findIndex((it) => it.ingredientId === ing.id);
   if (ex > -1) {
     const upd = [...rItems.value];
-    upd[ex] = { ...upd[ex], qty: upd[ex].qty + q };
+    upd[ex] = { ...upd[ex], qty: roundQty(upd[ex].qty + stockQty) };
     rItems.value = upd;
   } else {
-    rItems.value = [...rItems.value, { ingredientId: ing.id, name: ing.name, qty: q, unit: ing.unit }];
+    rItems.value = [...rItems.value, { ingredientId: ing.id, name: ing.name, qty: stockQty, unit: ing.unit }];
   }
   rIngId.value = '';
   rQty.value = '';
+  rUnit.value = '';
 };
 
 const rSubmit = () => {
@@ -353,6 +375,56 @@ const addUnit = () => {
   store.units = [...store.units, { id: uid('u'), name: n }];
   unitName.value = '';
   toast(`واحد «${n}» ثبت شد`);
+};
+
+/* ===== تبدیل واحد (ضریب نسبت به واحد مبنا) ===== */
+// ویرایش ردیف فعال: مقدارهای محلی (تا «انصراف» تغییری در استور نگذارد)
+const convEdit = ref(null);
+const convEditFactor = ref('');
+const convEditBase = ref('');
+const startConv = (u) => {
+  convEdit.value = u.id;
+  convEditFactor.value = u.factor ? String(u.factor) : '';
+  convEditBase.value = u.baseUnit || '';
+};
+const cancelConv = () => { convEdit.value = null; convEditFactor.value = ''; convEditBase.value = ''; };
+const saveConv = (u) => {
+  const f = Number(String(convEditFactor.value).replace(/[۰-۹]/g, (d) => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d)));
+  const base = convEditBase.value;
+  if (base && (!f || f <= 0)) return toast('ضریب باید عددی بزرگ‌تر از صفر باشد', 'error');
+  if (!base && convEditFactor.value.trim() !== '' && (!f || f <= 0)) return toast('ضریب باید عددی بزرگ‌تر از صفر باشد', 'error');
+  if (base === u.name) return toast('واحد مبنا نمی‌تواند خود واحد باشد', 'error');
+  // جلوگیری از حلقه: واحد مبنا نباید به این واحد برسد
+  if (base) {
+    let cur = base;
+    let guard = 0;
+    while (guard++ < 10) {
+      const x = store.units.find((y) => y.name === cur);
+      if (!x || !x.baseUnit) break;
+      if (x.baseUnit === u.name) return toast('این انتخاب حلقه تبدیل ایجاد می‌کند', 'error');
+      cur = x.baseUnit;
+    }
+  }
+  store.units = store.units.map((x) => (x.id === u.id ? { ...x, baseUnit: base, factor: base ? f : undefined } : x));
+  toast(base ? `تبدیل «${u.name}» به «${base}» با ضریب ${toFa(f)} ذخیره شد` : `تبدیل واحد «${u.name}» حذف شد`);
+  cancelConv();
+};
+const removeConv = (u) => {
+  store.units = store.units.map((x) => (x.id === u.id ? { ...x, baseUnit: '', factor: undefined } : x));
+  toast(`تبدیل واحد «${u.name}» حذف شد`);
+};
+const convChainText = (u) => {
+  if (!u.baseUnit) return '—';
+  const parts = [`1 ${u.name} = ${toFa(u.factor)} ${u.baseUnit}`];
+  let cur = u.baseUnit;
+  let guard = 0;
+  while (guard++ < 10) {
+    const x = store.units.find((y) => y.name === cur);
+    if (!x || !x.baseUnit) break;
+    parts.push(`1 ${x.name} = ${toFa(x.factor)} ${x.baseUnit}`);
+    cur = x.baseUnit;
+  }
+  return parts.join(' ← ');
 };
 
 /* ============ تب نرخ مالیات ============ */
@@ -578,6 +650,14 @@ const editingRoleName = computed(() => (store.roles.find((r) => r.id === roleEdi
         <div>
           <label class="block text-xs font-bold text-slate-700 mb-1.5">وابسته به (خیریه/سازمان):</label>
           <input v-model="bF.charityName" :class="inputCls" />
+        </div>
+        <div>
+          <label class="block text-xs font-bold text-slate-700 mb-1.5">واحد پول:</label>
+          <select v-model="bF.currency" :class="`${inputCls} font-bold`">
+            <option value="تومان">تومان</option>
+            <option value="ریال">ریال</option>
+          </select>
+          <p class="text-[10px] text-slate-500 mt-1">در همه صفحات (فاکتور، انبار، گزارش‌ها و چاپ‌ها) اعمال می‌شود.</p>
         </div>
       </div>
       <button type="submit" class="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-black transition">ذخیره</button>
@@ -904,9 +984,17 @@ const editingRoleName = computed(() => (store.roles.find((r) => r.id === roleEdi
                 }))"
               />
             </div>
-            <div class="sm:col-span-3">
-              <label class="block text-[11px] font-bold text-slate-600 mb-1">مقدار مصرفی هر پرس ({{ rIng ? rIng.unit : 'واحد' }}):</label>
+            <div class="sm:col-span-2">
+              <label class="block text-[11px] font-bold text-slate-600 mb-1">مقدار مصرفی هر پرس:</label>
               <FaNumberInput v-model="rQty" :class="`${inputCls} bg-white text-center text-xs`" />
+            </div>
+            <div class="sm:col-span-2">
+              <label class="block text-[11px] font-bold text-slate-600 mb-1">واحد مصرف:</label>
+              <select v-if="rUnitOptions.length > 1" v-model="rUnit" :class="`${inputCls} bg-white text-xs`">
+                <option v-for="o in rUnitOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
+              </select>
+              <div v-else :class="`${inputCls} bg-slate-50 text-center text-xs text-slate-500`">{{ rIng ? rIng.unit : 'واحد' }}</div>
+              <p v-if="rConvPreview" class="text-[9px] font-bold mt-1" :class="rConvPreview === 'تبدیل تعریف نشده' ? 'text-rose-500' : 'text-slate-500'">{{ rConvPreview }}</p>
             </div>
             <div class="sm:col-span-3">
               <button type="button" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-2.5 rounded-xl text-xs transition flex items-center justify-center gap-1.5" @click="rAddItem">
@@ -1087,7 +1175,7 @@ const editingRoleName = computed(() => (store.roles.find((r) => r.id === roleEdi
     </div>
 
     <!-- ============ تب واحد اندازه‌گیری ============ -->
-    <div v-else-if="tab === 'units'" class="max-w-xl space-y-4">
+    <div v-else-if="tab === 'units'" class="max-w-3xl space-y-4">
       <form class="bg-white border border-slate-200 rounded-2xl p-5 space-y-4" @submit.prevent="addUnit">
         <h3 class="font-black text-sm text-slate-800">تعریف واحد اندازه‌گیری</h3>
         <div class="flex gap-2">
@@ -1099,23 +1187,56 @@ const editingRoleName = computed(() => (store.roles.find((r) => r.id === roleEdi
         <p class="text-[10px] text-slate-500">واحدهای وارد‌شده در قالب جدول زیر نمایش داده می‌شوند و ورود نام تکراری مسدود است.</p>
       </form>
 
+      <div class="bg-sky-50 border border-sky-200 rounded-2xl p-3.5 text-[11px] font-bold text-sky-900 leading-relaxed">
+        تبدیل واحد: برای هر واحد می‌توانید «واحد مبنا» و «ضریب» تعیین کنید (مثلاً 1 گرم = 0.001 کیلوگرم یا 1 کارتن تخم‌مرغ = 30 عدد).
+        پس از تعریف تبدیل، در ورود کالا به انبار و رسپی می‌توانید مقدار را با واحد دلخواه وارد کنید — برنامه خودکار به واحد اصلی ماده تبدیل می‌کند.
+      </div>
+
       <div class="bg-white border border-slate-200 rounded-2xl overflow-hidden">
         <table class="w-full text-right text-xs">
           <thead class="bg-slate-50 font-black text-slate-700 border-b border-slate-200">
             <tr>
               <th class="p-3 w-16 text-center">ردیف</th>
               <th class="p-3">نام واحد اندازه‌گیری</th>
+              <th class="p-3">تبدیل به واحد مبنا</th>
+              <th class="p-3 text-center w-24">ویرایش</th>
               <th class="p-3 text-center w-20">حذف</th>
             </tr>
           </thead>
           <tbody class="divide-y divide-slate-100">
-            <EmptyRow v-if="store.units.length === 0" :col-span="3" text="واحدی تعریف نشده" />
+            <EmptyRow v-if="store.units.length === 0" :col-span="5" text="واحدی تعریف نشده" />
             <template v-else>
-              <tr v-for="(u, i) in store.units" :key="u.id" class="hover:bg-slate-50">
-                <td class="p-3 text-center text-slate-500">{{ toFa(i + 1) }}</td>
+              <tr v-for="u in store.units" :key="u.id" class="hover:bg-slate-50">
+                <td class="p-3 text-center text-slate-500">{{ toFa(store.units.indexOf(u) + 1) }}</td>
                 <td class="p-3 font-black text-slate-800">{{ u.name }}</td>
+                <td class="p-3 text-slate-600">
+                  <template v-if="convEdit === u.id">
+                    <div class="flex items-center gap-2 flex-wrap">
+                      <span class="font-black whitespace-nowrap">1 {{ u.name }} =</span>
+                      <input
+                        v-model="convEditFactor"
+                        dir="ltr"
+                        inputmode="decimal"
+                        class="w-24 border border-emerald-300 rounded-lg px-2 py-1 text-center font-black text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                        placeholder="ضریب"
+                      />
+                      <select v-model="convEditBase" :class="`${inputCls} w-40 text-xs py-1.5`">
+                        <option value="">— بدون تبدیل —</option>
+                        <option v-for="o in store.units.filter((x) => x.name !== u.name)" :key="o.id" :value="o.name">{{ o.name }}</option>
+                      </select>
+                      <button class="px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-[10px] font-black" @click="saveConv(u)">ذخیره</button>
+                      <button class="px-3 py-1.5 bg-slate-100 text-slate-600 rounded-lg text-[10px] font-black" @click="cancelConv">لغو</button>
+                    </div>
+                  </template>
+                  <template v-else>
+                    <span :class="u.baseUnit ? 'font-black text-emerald-700' : 'text-slate-400'">{{ convChainText(u) }}</span>
+                  </template>
+                </td>
                 <td class="p-3 text-center">
-                  <button title="حذف واحد" class="p-1.5 text-slate-500 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition inline-block" @click="requestDelete('unit', u)"><Trash2 class="w-4 h-4" /></button>
+                  <button v-if="convEdit !== u.id" title="تعریف/ویرایش تبدیل" class="p-1.5 text-slate-500 hover:text-sky-600 hover:bg-sky-50 rounded-lg transition inline-block" @click="startConv(u)"><Edit3 class="w-4 h-4" /></button>
+                </td>
+                <td class="p-3 text-center">
+                  <button v-if="u.baseUnit" title="حذف تبدیل" class="p-1.5 text-slate-500 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition inline-block" @click="removeConv(u)"><Trash2 class="w-4 h-4" /></button>
                 </td>
               </tr>
             </template>

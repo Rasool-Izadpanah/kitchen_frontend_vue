@@ -11,6 +11,7 @@ import {
   AlertTriangle, Boxes, ShoppingBag, Plus, Trash2, FileText, Pencil,
 } from 'lucide-vue-next';
 import { toFa, formatMoney, nowTime, jalaliTodayString, faDate, jalaliToJdn, uid } from '../lib/utils.js';
+import { convertQty, compatibleUnits, roundQty } from '../lib/units.js';
 import { inputCls } from '../components/ui/inputCls.js';
 import EmptyRow from '../components/ui/EmptyRow.vue';
 import NumberSpinner from '../components/ui/NumberSpinner.vue';
@@ -78,23 +79,55 @@ const selectedItem = computed(() => allItemOptions.value.find((o) => o.kind === 
 
 const pickMoveRowItem = (v) => {
   const opt = allItemOptions.value.find((o) => o.id === v);
-  moveRowSel.value = { kind: opt?.kind || 'ingredient', id: v, qty: moveRowSel.value.qty, price: '' };
+  moveRowSel.value = { kind: opt?.kind || 'ingredient', id: v, qty: moveRowSel.value.qty, price: '', entryUnit: '' };
 };
+
+// واحد ثبت: پیش‌فرض واحد خود قلم؛ قابل تغییر به واحدهای هم‌خانواده (مثلاً کارتن ← عدد)
+const entryUnitOptions = computed(() => {
+  if (!selectedItem.value) return [];
+  const ing = selectedItem.value.kind === 'ingredient' ? store.ingredients.find((i) => i.id === selectedItem.value.id) : null;
+  const base = ing?.unit || selectedItem.value.unit;
+  return compatibleUnits(store.units, base).map((n) => ({ value: n, label: n, searchText: n }));
+});
+const entryUnit = computed(() => moveRowSel.value.entryUnit || selectedItem.value?.unit || '');
+// ضریب تبدیل: 1 [entryUnit] = ? [واحد انبار]
+const entryConvFactor = computed(() => {
+  if (!selectedItem.value) return 1;
+  const ing = selectedItem.value.kind === 'ingredient' ? store.ingredients.find((i) => i.id === selectedItem.value.id) : null;
+  const base = ing?.unit || selectedItem.value.unit;
+  const c = convertQty(store.units, 1, entryUnit.value, base);
+  return c === null ? null : roundQty(c);
+});
 
 const addMoveRow = () => {
   if (!selectedItem.value) return props.showToast('انتخاب قلم الزامی است', 'error');
   const q = Number(moveRowSel.value.qty);
   if (!q || q <= 0) return props.showToast('مقدار باید بیشتر از صفر باشد', 'error');
   const price = Number(moveRowSel.value.price) || 0;
+  const ing = selectedItem.value.kind === 'ingredient' ? store.ingredients.find((i) => i.id === selectedItem.value.id) : null;
+  const stockUnit = ing?.unit || selectedItem.value.unit;
+  // تبدیل مقدار ورودی به واحد انبار
+  let stockQty = q;
+  let convNote = '';
+  if (entryUnit.value !== stockUnit) {
+    const c = convertQty(store.units, q, entryUnit.value, stockUnit);
+    if (c === null) return props.showToast(`تبدیل «${entryUnit.value}» به «${stockUnit}» تعریف نشده است — ابتدا در تنظیمات، تبدیل واحد را تعریف کنید`, 'error');
+    stockQty = roundQty(c);
+    convNote = `${toFa(q)} ${entryUnit.value} = ${toFa(stockQty)} ${stockUnit}`;
+  }
   const ex = moveRows.value.findIndex((r) => r.kind === selectedItem.value.kind && r.id === selectedItem.value.id);
   if (ex > -1) {
     const upd = [...moveRows.value];
-    upd[ex] = { ...upd[ex], qty: upd[ex].qty + q, price: price || upd[ex].price || 0 };
+    upd[ex] = { ...upd[ex], qty: roundQty(upd[ex].qty + stockQty), price: price || upd[ex].price || 0 };
     moveRows.value = upd;
   } else {
-    moveRows.value = [...moveRows.value, { kind: selectedItem.value.kind, id: selectedItem.value.id, name: selectedItem.value.name, unit: selectedItem.value.unit, qty: q, price }];
+    moveRows.value = [...moveRows.value, {
+      kind: selectedItem.value.kind, id: selectedItem.value.id, name: selectedItem.value.name,
+      unit: stockUnit, qty: stockQty, price,
+      entryQty: q, entryUnit: entryUnit.value, convNote,
+    }];
   }
-  moveRowSel.value = { kind: 'ingredient', id: '', qty: '', price: '' };
+  moveRowSel.value = { kind: 'ingredient', id: '', qty: '', price: '', entryUnit: '' };
 };
 
 const removeMoveRow = (idx) => { moveRows.value = moveRows.value.filter((_, i) => i !== idx); };
@@ -510,7 +543,7 @@ const TABS = [
         <div class="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-3">
           <div class="text-xs font-black text-slate-700">افزودن قلم (مواد غذایی و اقلام جانبی):</div>
           <div class="grid grid-cols-1 sm:grid-cols-12 gap-3 items-end">
-            <div class="sm:col-span-7">
+            <div class="sm:col-span-5">
               <label class="block text-[11px] font-bold text-slate-600 mb-1">قلم انبار:</label>
               <SearchableSelect
                 :model-value="moveRowSel.id"
@@ -521,8 +554,22 @@ const TABS = [
               />
             </div>
             <div class="sm:col-span-3">
-              <label class="block text-[11px] font-bold text-slate-600 mb-1">مقدار {{ selectedItem ? `(${selectedItem.unit})` : '' }}:</label>
+              <label class="block text-[11px] font-bold text-slate-600 mb-1">مقدار:</label>
               <NumberSpinner v-model="moveRowSel.qty" :min="0" :step="1" />
+            </div>
+            <div class="sm:col-span-2">
+              <label class="block text-[11px] font-bold text-slate-600 mb-1">واحد ثبت:</label>
+              <select
+                v-if="entryUnitOptions.length > 1"
+                v-model="moveRowSel.entryUnit"
+                :class="`${inputCls} text-xs py-2`"
+              >
+                <option v-for="o in entryUnitOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
+              </select>
+              <div v-else :class="`${inputCls} bg-slate-50 text-center text-xs py-2 text-slate-500`">{{ selectedItem ? selectedItem.unit : '—' }}</div>
+              <p v-if="entryUnitOptions.length > 1 && entryConvFactor" class="text-[9px] text-slate-500 mt-1 font-bold">
+                1 {{ entryUnit }} = {{ toFa(entryConvFactor) }} {{ selectedItem?.unit }}
+              </p>
             </div>
             <div v-if="isIn" class="sm:col-span-3">
               <label class="block text-[11px] font-bold text-slate-600 mb-1">قیمت واحد:</label>
@@ -559,6 +606,7 @@ const TABS = [
                 <td class="p-2.5 font-black text-slate-800">
                   {{ r.name }}
                   <span v-if="r.kind === 'supply'" class="mr-1.5 text-[9px] font-black bg-sky-100 text-sky-700 px-2 py-0.5 rounded-full">قلم جانبی</span>
+                  <div v-if="r.convNote" class="text-[9px] font-bold text-slate-400 mt-0.5">{{ r.convNote }}</div>
                 </td>
                 <td class="p-2.5 text-center font-black text-emerald-700">{{ toFa(r.qty) }} {{ r.unit }}</td>
                 <td v-if="isIn" class="p-2.5 text-left font-bold">{{ r.price ? formatMoney(r.price) : '—' }}</td>
