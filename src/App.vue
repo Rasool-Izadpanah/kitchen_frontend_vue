@@ -90,8 +90,10 @@ const SIDEBAR = [
   {
     id: 'config', label: 'تنظیمات', icon: Sliders,
     children: [
+      { id: 'cfg-units', label: 'واحد اندازه‌گیری و تبدیل', page: 'settings', tab: 'units', perm: 'manage_settings' },
       { id: 'cfg-tax', label: 'تنظیم نرخ مالیات', page: 'settings', tab: 'tax', perm: 'manage_settings' },
       { id: 'cfg-fonts', label: 'تنظیم فونت', page: 'settings', tab: 'fonts', perm: 'manage_settings' },
+      { id: 'cfg-all', label: 'همه تنظیمات', page: 'settings', tab: null, perm: 'manage_settings' },
     ],
   },
 ];
