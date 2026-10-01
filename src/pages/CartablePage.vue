@@ -115,31 +115,46 @@ const startEdit = (type, key, idx, msg) => {
 const setDeliveryField = (key, idx, field, value) => {
   delivery.value = { ...delivery.value, [key]: { ...(delivery.value[key] || {}), [idx]: { ...(delivery.value[key]?.[idx] || {}), [field]: value } } };
 };
+// دو چک‌باکس متقابلاً انحصاری: تحویل شده / عدم تحویل
+const setDeliveryDecision = (key, idx, decision) => {
+  const cur = delivery.value[key]?.[idx] || {};
+  const nextDecision = cur.decision === decision ? undefined : decision;
+  const next = { ...cur, decision: nextDecision };
+  if (nextDecision === 'notdelivered') next.qty = '';
+  delivery.value = { ...delivery.value, [key]: { ...(delivery.value[key] || {}), [idx]: next } };
+};
 
 const confirmDelivery = (row) => {
   const r = row.raw;
   const entries = delivery.value[row.key] || {};
-  if (Object.keys(entries).length === 0) return toast('حداقل مقدار تحویل‌گرفتهٔ یک قلم را وارد کنید', 'error');
+  const undecidedCount = r.items.filter((_, i) => !entries[i]?.decision).length;
+  if (undecidedCount > 0) return toast(`وضعیت تحویل ${toFa(undecidedCount)} قلم مشخص نشده است`, 'error');
 
-  // اعتبارسنجی: هر قلم واردشده باید به ماده/قلم واقعی انبار وصل باشد وگرنه خطا (نه افزودن بی‌صدا)
-  for (const [i, e] of Object.entries(entries)) {
-    const it = r.items[Number(i)];
-    if (!it) continue;
-    if (e.qty === undefined || e.qty === '') continue;
-    const n = Number(e.qty);
+  // اعتبارسنجی مقادیر واردشده (فیلد خالی = همان مقدار تاییدشده)
+  for (let i = 0; i < r.items.length; i++) {
+    const it = r.items[i];
+    const e = entries[i];
+    if (e.decision !== 'delivered') continue;
+    const raw = String(e.qty ?? '').trim();
+    if (raw === '') continue;
+    const n = Number(raw);
     if (Number.isNaN(n) || n < 0) return toast(`مقدار تحویل «${it.name}» نامعتبر است`, 'error');
     if (n > 0 && it.ingredientId && !store.ingredients.some((ing) => ing.id === it.ingredientId)) {
-      return toast(`قلم «${it.name}» در انبار یافت نشد — افزودن به موجودی انجام نشد`, 'error');
+      return toast(`قلم «${it.name}» در انبار یافت نشد`, 'error');
     }
   }
 
   let anyAdded = false;
   const overReceipts = [];
+  let notDelivered = 0;
   const updatedItems = r.items.map((it, i) => {
     const e = entries[i];
-    if (!e || e.qty === undefined || e.qty === '') return it;
-    const recvQty = Number(e.qty);
-    if (Number.isNaN(recvQty) || recvQty < 0) return it;
+    if (e.decision !== 'delivered') {
+      notDelivered++;
+      return { ...it, receivedQty: 0, deliveryNote: (e.note || '').trim(), deliveredAt: `${jalaliTodayString()} ${toFa(nowTime())}`, deliveredBy: props.userName, notDelivered: true };
+    }
+    const raw = String(e.qty ?? '').trim();
+    const recvQty = raw === '' ? it.qty : Number(raw);
     if (recvQty > 0) {
       store.ingredients = store.ingredients.map((ing) => (it.ingredientId === ing.id ? { ...ing, qty: Number((ing.qty + recvQty).toFixed(3)) } : ing));
       if (it.supplyId) store.supplies = (store.supplies || []).map((s) => (s.id === it.supplyId ? { ...s, qty: (s.qty || 0) + recvQty } : s));
@@ -148,6 +163,7 @@ const confirmDelivery = (row) => {
     }
     return { ...it, receivedQty: recvQty, deliveryNote: (e.note || '').trim(), deliveredAt: `${jalaliTodayString()} ${toFa(nowTime())}`, deliveredBy: props.userName };
   });
+  const deliveredCount = r.items.length - notDelivered;
   const newMoves = updatedItems.filter((it) => Number(it.receivedQty) > 0).map((it) => ({
     id: `m${Date.now()}_${Math.floor(Math.random() * 1000)}_${it.ingredientId || it.supplyId}`,
     date: jalaliTodayString(), time: toFa(nowTime()),
@@ -159,14 +175,26 @@ const confirmDelivery = (row) => {
     batchId: `B${Date.now().toString(36)}`,
   }));
   if (newMoves.length) store.moves = [...newMoves, ...(store.moves || [])];
-  const allReceived = updatedItems.every((it) => it.receivedQty !== undefined);
-  store.purchaseRequests = store.purchaseRequests.map((x) => (x.id === r.id ? { ...x, items: updatedItems, status: allReceived ? 'completed' : 'ordered', completedAt: allReceived ? `${jalaliTodayString()} ${toFa(nowTime())}` : x.completedAt, completedBy: allReceived ? props.userName : x.completedBy, audit: [...(x.audit || []), auditEntry(store.currentUser, `تحویل ${updatedItems.filter((it) => it.receivedQty !== undefined).length} قلم به انبار ثبت شد`)] } : x));
+  // همه اقلام تعیین تکلیف شدند → درخواست بسته می‌شود
+  const allNotDelivered = notDelivered === r.items.length;
+  store.purchaseRequests = store.purchaseRequests.map((x) => (x.id === r.id ? {
+    ...x,
+    items: updatedItems,
+    status: allNotDelivered ? 'cancelled' : 'completed',
+    completedAt: `${jalaliTodayString()} ${toFa(nowTime())}`,
+    completedBy: props.userName,
+    audit: [...(x.audit || []), auditEntry(store.currentUser, `تحویل خرید — ${deliveredCount} قلم تحویل شد، ${notDelivered} قلم تحویل نشد`)],
+  } : x));
   delivery.value = { ...delivery.value, [row.key]: {} };
-  toast(anyAdded
-    ? (overReceipts.length > 0
-      ? `به موجودی انبار اضافه شد — توجه: ${overReceipts.join('، ')}`
-      : 'اقلام تحویل‌گرفته‌شده به موجودی انبار اضافه شد')
-    : 'ثبت تحویل انجام شد');
+  pushMessage(r.requester, allNotDelivered
+    ? `درخواست خرید ${r.id} به دلیل عدم تهیه ابطال شد.`
+    : `درخواست خرید ${r.id} بسته شد: ${toFa(deliveredCount)} قلم تحویل و به انبار اضافه شد${notDelivered > 0 ? `، ${toFa(notDelivered)} قلم تحویل نشد` : ''}.`, allNotDelivered ? 'danger' : 'success');
+  viewing.value = null;
+  toast(allNotDelivered
+    ? 'درخواست به دلیل عدم تحویل بسته شد'
+    : (anyAdded
+      ? (overReceipts.length > 0 ? `به انبار اضافه شد — توجه: ${overReceipts.join('، ')}` : 'اقلام تحویل‌شده به انبار اضافه شد و درخواست بسته شد')
+      : 'درخواست بسته شد'));
 };
 
 /* ===== rows assembly ===== */
@@ -700,51 +728,57 @@ const viewingDecided = computed(() => (viewingRow.value ? viewingRow.value.items
             اقلام را تیک بزنید و «تایید» یا «رد» کنید — اقلام بدون تیک بلاتکلیف در کارتابل می‌مانند. وقتی همه اقلام تعیین تکلیف شدند با «تایید نهایی» درخواست بسته می‌شود.
           </div>
 
-          <!-- تحویل خرید: ورود مقادیر تحویل‌گرفته + توضیحات -->
+          <!-- تحویل خرید: چک‌باکس تحویل شده/عدم تحویل + مقدار تحویل‌گرفته -->
           <div v-if="viewingRow.type === 'purchasing'" class="space-y-3">
-            <table v-if="viewingAwaiting.length > 0" class="w-full text-right text-xs">
+            <div class="text-[11px] font-bold text-slate-500">
+              وضعیت تحویل هر قلم را مشخص کنید (تحویل شده یا عدم تحویل) — پس از تعیین تکلیف همه اقلام، درخواست بسته می‌شود.
+            </div>
+            <table class="w-full text-right text-xs">
               <thead class="text-slate-500 font-black border-b border-slate-200">
                 <tr>
+                  <th class="p-2 text-center">تحویل شده</th>
+                  <th class="p-2 text-center">عدم تحویل</th>
                   <th class="p-2">شرح</th>
                   <th class="p-2 text-center">مقدار درخواست</th>
-                  <th class="p-2 text-center w-28">تحویل‌گرفته</th>
-                  <th class="p-2">توضیحات تحویل</th>
+                  <th class="p-2 text-center">مقدار تایید شده</th>
+                  <th class="p-2 text-center w-28">مقدار تحویل گرفته شده</th>
+                  <th class="p-2">توضیحات</th>
                 </tr>
               </thead>
               <tbody class="divide-y divide-slate-200">
-                <tr v-for="({ it, i }) in viewingAwaiting" :key="i">
-                  <td class="p-2.5 font-bold text-slate-700">{{ it.name }}</td>
-                  <td class="p-2.5 text-center font-black">
-                    <span v-if="editingRow && editingRow.key === viewingRow.key && editingRow.idx === i" class="inline-flex items-center gap-1">
-                      <input
-                        v-focus
-                        :value="editingRow.value ?? String(it.qty)"
-                        @input="editingRow = { ...editingRow, value: $event.target.value }"
-                        @keydown.enter="saveItemEdit({ row: viewingRow, idx: i, qty: $event.target.value })"
-                        @keydown.esc="editingRow = null"
-                        class="w-16 border border-emerald-400 rounded-lg px-2 py-1 text-center font-black text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                      />
-                      <button @click="saveItemEdit({ row: viewingRow, idx: i, qty: editingRow.value ?? String(it.qty) })" class="px-1.5 py-1 bg-emerald-600 text-white rounded-lg text-[9px] font-black">ذخیره</button>
-                      <button @click="editingRow = null" class="px-1.5 py-1 bg-slate-100 text-slate-600 rounded-lg text-[9px] font-black">لغو</button>
-                    </span>
-                    <button
-                      v-else
-                      @click="startEdit(viewingRow.type, viewingRow.key, i, 'شما مجوز ویرایش مقادیر این درخواست را ندارید')"
-                      :title="canEditRequest(viewingRow.type) ? 'اصلاح مقدار سفارش' : 'بدون مجوز ویرایش'"
-                      :class="`inline-flex items-center gap-1 px-2 py-0.5 rounded-lg transition ${canEditRequest(viewingRow.type) ? 'hover:bg-emerald-50 hover:text-emerald-700' : 'cursor-not-allowed opacity-60'}`"
-                    >
-                      {{ toFa(it.qty) }} {{ it.unit }}
-                      <Pencil v-if="canEditRequest(viewingRow.type)" class="w-3 h-3 opacity-40" />
-                    </button>
+                <tr
+                  v-for="({ it, i }) in viewingRow.items.map((it, i) => ({ it, i }))"
+                  :key="i"
+                  :class="delivery[viewingRow.key]?.[i]?.decision === 'delivered' ? 'bg-emerald-50/50' : delivery[viewingRow.key]?.[i]?.decision === 'notdelivered' ? 'bg-rose-50/50' : ''"
+                >
+                  <td class="p-2.5 text-center">
+                    <input
+                      type="checkbox"
+                      :checked="delivery[viewingRow.key]?.[i]?.decision === 'delivered'"
+                      @change="setDeliveryDecision(viewingRow.key, i, 'delivered')"
+                      class="w-4.5 h-4.5 accent-emerald-600 cursor-pointer"
+                    />
                   </td>
+                  <td class="p-2.5 text-center">
+                    <input
+                      type="checkbox"
+                      :checked="delivery[viewingRow.key]?.[i]?.decision === 'notdelivered'"
+                      @change="setDeliveryDecision(viewingRow.key, i, 'notdelivered')"
+                      class="w-4.5 h-4.5 accent-rose-600 cursor-pointer"
+                    />
+                  </td>
+                  <td class="p-2.5 font-bold text-slate-700">{{ it.name }}</td>
+                  <td class="p-2.5 text-center font-black text-slate-600">{{ toFa(it.qty) }} {{ it.unit }}</td>
+                  <td class="p-2.5 text-center font-black text-slate-600">{{ toFa(it.qty) }} {{ it.unit }}</td>
                   <td class="p-2.5 text-center">
                     <input
                       dir="ltr"
                       inputMode="decimal"
+                      :disabled="delivery[viewingRow.key]?.[i]?.decision !== 'delivered'"
                       :value="delivery[viewingRow.key]?.[i]?.qty ?? ''"
                       @input="setDeliveryField(viewingRow.key, i, 'qty', $event.target.value)"
-                      :placeholder="String(it.qty)"
-                      class="w-20 border border-emerald-300 rounded-lg px-2 py-1 text-center font-black text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                      :placeholder="delivery[viewingRow.key]?.[i]?.decision === 'delivered' ? String(it.qty) : '—'"
+                      class="w-20 border border-emerald-300 rounded-lg px-2 py-1 text-center font-black text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:bg-slate-100 disabled:text-slate-300"
                     />
                   </td>
                   <td class="p-2.5">
@@ -849,22 +883,22 @@ const viewingDecided = computed(() => (viewingRow.value ? viewingRow.value.items
           <div class="flex gap-2 pt-2 border-t border-slate-100">
             <template v-if="viewingRow.type === 'purchasing'">
               <button
-                @click="voidPurchase(viewingRow)"
-                class="flex-1 px-4 py-3 bg-rose-50 hover:bg-rose-100 text-rose-600 rounded-xl text-xs font-black flex items-center justify-center gap-1.5 transition border border-rose-200"
-              >
-                <X class="w-4 h-4" /> ابطال درخواست (تهیه نشد)
-              </button>
-              <button
                 @click="confirmDelivery(viewingRow)"
                 class="flex-1 px-4 py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-black flex items-center justify-center gap-1.5 transition"
               >
-                <CheckCheck class="w-4 h-4" /> تایید تحویل و افزودن به انبار
+                <CheckCheck class="w-4 h-4" /> تایید
               </button>
               <button
-                @click="printPurchase = viewingRow.raw"
-                class="px-4 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-black flex items-center justify-center gap-1.5 transition border border-slate-200"
+                @click="voidPurchase(viewingRow)"
+                class="flex-1 px-4 py-3 bg-rose-50 hover:bg-rose-100 text-rose-600 rounded-xl text-xs font-black flex items-center justify-center gap-1.5 transition border border-rose-200"
               >
-                <Printer class="w-4 h-4" /> چاپ
+                <X class="w-4 h-4" /> ابطال درخواست
+              </button>
+              <button
+                @click="viewing = null"
+                class="px-5 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-black flex items-center justify-center gap-1.5 transition border border-slate-200"
+              >
+                بستن
               </button>
             </template>
             <template v-else>
@@ -880,13 +914,13 @@ const viewingDecided = computed(() => (viewingRow.value ? viewingRow.value.items
               >
                 <X class="w-4 h-4" /> رد
               </button>
+              <button
+                @click="viewing = null"
+                class="px-5 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-black flex items-center justify-center gap-1.5 transition border border-slate-200"
+              >
+                بستن فرم
+              </button>
             </template>
-            <button
-              @click="viewing = null"
-              class="px-5 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-black flex items-center justify-center gap-1.5 transition border border-slate-200"
-            >
-              بستن فرم
-            </button>
           </div>
         </div>
       </div>
