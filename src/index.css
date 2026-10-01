@@ -1,0 +1,53 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html {
+  font-family: 'Vazirmatn', ui-sans-serif, system-ui, sans-serif;
+}
+
+body {
+  @apply bg-slate-100 text-slate-800;
+}
+
+/* اسکرول‌بار نازک */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+/* اعداد در inputهای عددی با فونت مناسب */
+input[type='number'] { font-family: 'Vazirmatn', sans-serif; }
+
+
+/* ===== چاپ: فقط ناحیه print-area دیده می‌شود ===== */
+@media print {
+  @page { size: A4 portrait; margin: 8mm; }
+  body { background: #fff !important; }
+  body * { visibility: hidden !important; }
+  #print-area, #print-area * { visibility: visible !important; }
+  #print-area {
+    position: absolute !important; inset: 0 auto auto 0 !important;
+    width: 100% !important; max-width: 100% !important;
+    border: none !important; box-shadow: none !important; border-radius: 0 !important;
+    padding: 6mm !important; margin: 0 !important;
+  }
+  .print-copy-wrap { page-break-after: always; break-after: page; }
+  .print-copy-wrap:last-child { page-break-after: auto; break-after: auto; }
+  .no-print { display: none !important; }
+}
+
+/* ===== چاپ دو پرینتر حرارتی ===== */
+@media print {
+@media print {
+        body * { visibility: hidden !important; }
+        .dual-print-area, .dual-print-area * { visibility: visible !important; }
+        .dual-print-area {
+          position: absolute !important; inset: 0 auto auto 0 !important;
+          width: 74mm !important; max-width: 100% !important;
+          border: none !important; box-shadow: none !important; padding: 0 !important; margin: 0 !important;
+        }
+        .dual-print-wrap { page-break-after: always; break-after: page; }
+        .dual-print-wrap:last-child { page-break-after: auto; break-after: auto; }
+      }
+}
