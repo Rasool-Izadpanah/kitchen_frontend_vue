@@ -1,11 +1,9 @@
 <script setup>
 /**
- * برنامه پخت روزانه — معادل DailyCookingPage.jsx
- * - ثبت غذاهای روز + تعداد پخت (کاربر عادی/ادمین)
- * - محاسبه خودکار مواد مصرفی بر اساس رسپی و نمایش کسری با رنگ متمایز
- * - درخواست موقت می‌ماند تا کسری جبران شود؛ سپس قطعی و کسر از انبار (اختیاری/دستی)
- * - برنامه‌گذشته برای روزهای آینده تا ۷ روز؛ کنترل موجودی در هر بازشدن
- * - ویرایش/حذف تا قبل از صدور فاکتور آن تاریخ؛ پس از فاکتور فقط حذف غذای خاص (با تأیید)
+ * برنامه پخت روزانه — ماشین حالت فاز ۱
+ * ثبت → pending (در انتظار تأیید سرآشپز) → رزرو (approve سرآشپز) → approved (تأیید مدیر در کارتابل)
+ * - نیاز مواد با احتساب پرتی: recipeQty × planQty × (1 + wastePercent/100)
+ * - کسری بر مبنای موجودی قابل استفاده (qty - reserved)
  */
 import { ref, computed } from 'vue';
 import {
@@ -13,6 +11,7 @@ import {
   Clock3, CheckCheck, PackageX, PackagePlus,
 } from 'lucide-vue-next';
 import { toFa, nowTime, jalaliTodayString, jalaliOffsetString, faDatePretty, userDisplay, auditEntry } from '../lib/utils.js';
+import { PLAN_STATUS_META, shortageOnAvailable } from '../lib/inventory.js';
 import { useAppStore } from '../stores/app.js';
 import NumberSpinner from '../components/ui/NumberSpinner.vue';
 import Modal from '../components/ui/Modal.vue';
@@ -22,7 +21,7 @@ import JalaliDatePicker from '../components/JalaliDatePicker.vue';
 const props = defineProps({
   showToast: { type: Function, required: true },
   userName: { type: String, default: '—' },
-  initialTab: { type: String, default: null }, // 'register' | 'drafts' | null (هر دو)
+  initialTab: { type: String, default: null },
   showTabs: { type: Boolean, default: false },
 });
 
@@ -36,42 +35,18 @@ const editId = ref(null);
 const dishId = ref('');
 const qty = ref('1');
 const items = ref([]);
-const deductStock = ref(true);
-const confirmFinalize = ref(null);
 const confirmDelete = ref(null);
 const confirmRemoveDish = ref(null); // {plan, dishId, dishName}
 const viewShortage = ref(null); // {plan, sh}
+const confirmCancel = ref(null);
+
+const auditUser = () => ({ fullName: props.userName, username: props.userName });
 
 const recipeOf = (dId) => store.recipes.find((r) => r.dishId === dId) || null;
+const statusMeta = (p) => PLAN_STATUS_META[p.status] || PLAN_STATUS_META.pending;
 
-// ===== محاسبه مواد موردنیاز =====
-const calcNeeds = (planItems) => {
-  const map = {};
-  planItems.forEach((it) => {
-    const rec = recipeOf(it.dishId);
-    if (!rec) return;
-    rec.items.forEach((ri) => {
-      if (!map[ri.ingredientId]) map[ri.ingredientId] = { name: ri.name, unit: ri.unit, need: 0 };
-      map[ri.ingredientId].need += ri.qty * it.qty;
-    });
-  });
-  return map;
-};
-
-// ===== کنترل موجودی لحظه‌ای (با هر بار بازشدن محاسبه می‌شود) =====
-const shortageInfo = (planItems) => {
-  const needs = calcNeeds(planItems);
-  const rows = Object.entries(needs).map(([ingId, n]) => {
-    const ing = store.ingredients.find((i) => i.id === ingId);
-    const stock = ing ? ing.qty : 0;
-    const shortage = Math.max(0, n.need - stock);
-    return { ingId, name: n.name, unit: n.unit, need: n.need, stock, shortage, ok: shortage <= 0 };
-  });
-  return {
-    rows: rows.sort((a, b) => (a.ok === b.ok ? b.need - a.need : a.ok ? 1 : -1)),
-    hasShortage: rows.some((r) => !r.ok),
-  };
-};
+// ===== کسری لحظه‌ای بر مبنای موجودی قابل استفاده (با پرتی) =====
+const shortageInfo = (planItems) => shortageOnAvailable(store, planItems);
 
 // غذاهایی که در فاکتورهای یک تاریخ فروخته شده‌اند
 const invoiceSoldDishIdsFor = (date) => {
@@ -92,7 +67,7 @@ const addToPlan = () => {
     items.value = upd;
     props.showToast('تعداد پخت این غذا افزایش یافت');
   } else {
-    items.value = [...items.value, { dishId: dishId.value, dishName: dish.name, qty: n }];
+    items.value = [...items.value, { dishId: dishId.value, dishName: dish.name, qty: n, decision: 'pending' }];
   }
   dishId.value = '';
   qty.value = '1';
@@ -106,111 +81,105 @@ const resetForm = () => {
   editId.value = null;
   planDate.value = today;
   items.value = [];
-  deductStock.value = true;
 };
 
 const submitPlan = () => {
   if (items.value.length === 0) return props.showToast('حداقل یک غذا به برنامه اضافه کنید', 'error');
   if (!planDate.value) return props.showToast('انتخاب تاریخ الزامی است', 'error');
-  // محدودیت ۷ روز آینده
   if (jalaliTodayString() > planDate.value) return props.showToast('برنامه برای گذشته قابل ثبت نیست', 'error');
   if (planDate.value > maxFuture) return props.showToast('برنامه حداکثر برای ۷ روز آینده امکان‌پذیر است', 'error');
   const sh = shortageInfo(items.value);
   const rec = {
     id: `plan_${Date.now().toString(36)}`,
     date: planDate.value,
-    items: [...items.value],
-    status: 'temp',
-    deductStock: deductStock.value,
-    createdAt: `${jalaliTodayString()} ${nowTime()}`,
+    items: items.value.map((it) => ({ ...it, decision: 'pending', approvedQty: null, rejectReason: '', decisionNote: '' })),
+    status: 'pending',
     createdBy: props.userName || '—',
-    finalizedAt: null,
-    finalizedBy: null,
+    createdAt: `${jalaliTodayString()} ${nowTime()}`,
+    reservedBy: null, reservedAt: null,
+    approvedBy: null, approvedAt: null,
+    rejectedBy: null, rejectedAt: null, rejectReason: '',
+    cancelledBy: null, cancelledAt: null, cancelReason: '',
+    reservationExpiresAt: null, reservationReleasedAt: null,
     stockDeducted: false,
-    audit: [auditEntry({ firstName: props.userName?.split(' ')[0], lastName: props.userName?.split(' ').slice(1).join(' '), fullName: props.userName }, 'ثبت برنامه پخت (موقت)')],
+    audit: [auditEntry(auditUser(), 'ثبت برنامه پخت — در انتظار تأیید سرآشپز')],
   };
   store.plans = [rec, ...store.plans];
   props.showToast(sh.hasShortage
-    ? 'برنامه موقت ثبت شد — کسری مواد موجود است؛ پس از جبران، قطعی کنید'
-    : 'برنامه موقت ثبت شد — برای کسر از انبار، قطعی کنید');
+    ? 'برنامه ثبت شد — کسری مواد موجود است؛ پس از تأیید سرآشپز رزرو انجام می‌شود'
+    : 'برنامه ثبت شد و در انتظار تأیید سرآشپز است');
   resetForm();
 };
 
 const startEdit = (p) => {
-  if (p.status !== 'temp') return props.showToast('برنامه قطعی‌شده قابل ویرایش نیست', 'error');
+  if (p.status !== 'pending') return props.showToast('فقط برنامه در انتظار تأیید قابل ویرایش است', 'error');
   editId.value = p.id;
   planDate.value = p.date;
   items.value = p.items.map((it) => ({ ...it }));
-  deductStock.value = p.deductStock !== false;
   window.scrollTo({ top: 0, behavior: 'smooth' });
 };
 
 const cancelEdit = () => resetForm();
 
-// ===== قطعی برنامه =====
-const doFinalize = (p) => {
-  const sh = shortageInfo(p.items);
-  if (sh.hasShortage) {
-    confirmFinalize.value = null;
-    return props.showToast('هنوز کسری مواد وجود دارد؛ ابتدا موجودی را از بخش ورود کالا جبران کنید', 'error');
-  }
-  let deducted = false;
-  if (p.deductStock && !p.stockDeducted) {
-    const needs = calcNeeds(p.items);
-    store.ingredients = store.ingredients.map((i) => (needs[i.id] ? { ...i, qty: Math.max(0, i.qty - needs[i.id].need) } : i));
-    deducted = true;
-  }
-  store.plans = store.plans.map((x) => (x.id === p.id
-    ? { ...x, status: 'final', finalizedAt: `${jalaliTodayString()} ${nowTime()}`, finalizedBy: props.userName || '—', stockDeducted: deducted, audit: [...(x.audit || []), auditEntry({ firstName: props.userName?.split(' ')[0], lastName: props.userName?.split(' ').slice(1).join(' '), fullName: props.userName }, 'قطعی‌سازی برنامه')] }
+// ذخیره ویرایش برنامه pending (اصلاح items در همان وضعیت)
+const saveEdit = () => {
+  if (items.value.length === 0) return props.showToast('حداقل یک غذا به برنامه اضافه کنید', 'error');
+  store.plans = store.plans.map((x) => (x.id === editId.value
+    ? {
+        ...x, date: planDate.value,
+        items: items.value.map((it) => ({ ...it, decision: it.decision || 'pending' })),
+        audit: [...(x.audit || []), auditEntry(auditUser(), 'ویرایش برنامه (در انتظار تأیید)')],
+      }
     : x));
-  confirmFinalize.value = null;
-  props.showToast(p.deductStock
-    ? 'برنامه قطعی شد و مواد از انبار کسر شد'
-    : 'برنامه قطعی شد (بدون کسر از انبار — کسر دستی از بخش خروج کالا)');
+  props.showToast('ویرایش برنامه ذخیره شد');
+  resetForm();
 };
 
-// ===== حذف کل برنامه =====
+// ===== حذف کل برنامه — اگر رزرو شده، رزرو آزاد می‌شود =====
 const doDeletePlan = (p) => {
   const sold = invoiceSoldDishIdsFor(p.date);
   if (sold.size > 0) {
     confirmDelete.value = null;
     return props.showToast('برای تاریخ این برنامه فاکتور صادر شده؛ فقط حذف غذای مشخص مجاز است', 'error');
   }
-  if (p.status === 'final' && p.stockDeducted) {
-    const needs = calcNeeds(p.items);
-    store.ingredients = store.ingredients.map((i) => (needs[i.id] ? { ...i, qty: i.qty + needs[i.id].need } : i));
+  if (p.status === 'reserved') {
+    // آزادسازی رزرو در کارتابل انجام می‌شود — اینجا فقط اطلاع
+    confirmDelete.value = null;
+    return props.showToast('برنامه رزرو شده است؛ ابتدا در کارتابل آن را رد کنید تا رزرو آزاد شود', 'error');
   }
-  store.plans = store.plans.filter((x) => x.id !== p.id);
+  if (p.status === 'approved' && p.stockDeducted) {
+    confirmDelete.value = null;
+    return props.showToast('برنامه تأیید نهایی شده و مواد آن مصرف شده است؛ حذف مجاز نیست', 'error');
+  }
+  store.plans = store.plans.map((x) => (x.id === p.id
+    ? { ...x, status: 'cancelled', cancelledBy: props.userName, cancelledAt: `${jalaliTodayString()} ${nowTime()}`, cancelReason: 'حذف توسط ثبت‌کننده', audit: [...(x.audit || []), auditEntry(auditUser(), 'لغو برنامه')] }
+    : x));
   confirmDelete.value = null;
-  props.showToast('برنامه حذف شد');
+  props.showToast('برنامه لغو شد');
 };
 
-// ===== حذف یک غذای خاص از برنامه =====
+// ===== حذف یک غذای خاص (فقط در pending) =====
 const doRemoveDish = ({ plan, dishId: dId }) => {
+  if (plan.status !== 'pending') return props.showToast('فقط در وضعیت در انتظار تأیید قابل حذف است', 'error');
   const updatedItems = plan.items.filter((it) => it.dishId !== dId);
-  if (plan.status === 'final' && plan.stockDeducted) {
-    const before = calcNeeds(plan.items);
-    const after = calcNeeds(updatedItems);
-    store.ingredients = store.ingredients.map((i) => {
-      const d = (before[i.id]?.need || 0) - (after[i.id]?.need || 0);
-      return d ? { ...i, qty: i.qty + d } : i;
-    });
-  }
   if (updatedItems.length === 0) {
-    store.plans = store.plans.filter((x) => x.id !== plan.id);
-    props.showToast('غذا حذف شد؛ برنامه خالی شد و حذف گردید');
+    store.plans = store.plans.map((x) => (x.id === plan.id
+      ? { ...x, status: 'cancelled', cancelledBy: props.userName, cancelledAt: `${jalaliTodayString()} ${nowTime()}`, cancelReason: 'حذف آخرین غذا', audit: [...(x.audit || []), auditEntry(auditUser(), 'لغو برنامه — حذف آخرین غذا')] }
+      : x));
+    props.showToast('غذا حذف شد؛ برنامه خالی شد و لغو گردید');
   } else {
-    store.plans = store.plans.map((x) => (x.id === plan.id ? { ...x, items: updatedItems } : x));
+    store.plans = store.plans.map((x) => (x.id === plan.id ? { ...x, items: updatedItems, audit: [...(x.audit || []), auditEntry(auditUser(), `حذف غذا «${dId}» از برنامه`)] } : x));
     props.showToast('غذا از برنامه حذف شد');
   }
   confirmRemoveDish.value = null;
 };
 
-const canEdit = (p) => p.status === 'temp';
-const canDeletePlan = (p) => invoiceSoldDishIdsFor(p.date).size === 0;
+const canEdit = (p) => p.status === 'pending';
+const canDeletePlan = (p) => p.status === 'pending' && invoiceSoldDishIdsFor(p.date).size === 0;
 
-// لیست برنامه‌ها مرتب‌شده + کسری/فاکتور لحظه‌ای هر برنامه (واکنش‌گرا به موجودی انبار)
+// لیست برنامه‌ها مرتب‌شده + کسری/فاکتور لحظه‌ای هر برنامه
 const sortedPlansView = computed(() => [...store.plans]
+  .filter((p) => p.status !== 'cancelled')
   .sort((a, b) => (a.date > b.date ? 1 : a.date < b.date ? -1 : 0))
   .map((p) => ({
     p,
@@ -221,8 +190,11 @@ const sortedPlansView = computed(() => [...store.plans]
 // پیش‌محاسبه کسری فرم جاری (زنده)
 const formShortage = computed(() => (items.value.length > 0 ? shortageInfo(items.value) : null));
 
-// کسری لحظه‌ای برنامه‌ی در حال قطعی (زنده — مثل IIFE در نسخه React)
-const finalizeShortage = computed(() => (confirmFinalize.value ? shortageInfo(confirmFinalize.value.items) : null));
+// موجودی قابل استفاده برای نمایش
+const availOf = (ingId) => {
+  const ing = store.ingredients.find((i) => i.id === ingId);
+  return ing ? Math.max(0, (ing.qty || 0) - (ing.reserved || 0)) : 0;
+};
 
 const addShortageToPurchase = (plan) => {
   const sh = shortageInfo(plan.items);
@@ -232,17 +204,15 @@ const addShortageToPurchase = (plan) => {
     ingredientId: r.ingId,
     name: r.name,
     unit: r.unit,
-    qty: Number((r.need - r.stock).toFixed(3)),
+    qty: r.shortage,
   }));
   if (needItems.length === 0) return props.showToast('کسری وجود ندارد', 'info');
 
-  // check for existing open purchase request for today
   const existingOpen = store.purchaseRequests.find(
     (pr) => pr.date === t && pr.status === 'temp'
   );
 
   if (existingOpen) {
-    // append to existing
     store.purchaseRequests = store.purchaseRequests.map((pr) => {
       if (pr.id !== existingOpen.id) return pr;
       const merged = [...pr.items];
@@ -254,11 +224,10 @@ const addShortageToPurchase = (plan) => {
           merged.push({ ...ni });
         }
       });
-      return { ...pr, items: merged, date: t }; // update date to today
+      return { ...pr, items: merged, date: t };
     });
     props.showToast(`${toFa(needItems.length)} قلم کسری به درخواست خریدِ بازِ امروز اضافه شد`);
   } else {
-    // create new purchase request
     const newReq = {
       id: `PR-${Date.now().toString(36)}`,
       date: t,
@@ -270,7 +239,6 @@ const addShortageToPurchase = (plan) => {
     store.purchaseRequests = [newReq, ...store.purchaseRequests];
     props.showToast(`درخواست خرید جدید برای ${toFa(needItems.length)} قلم کسری ایجاد شد`);
   }
-  // also send notification to purchasers
   const purchasers = store.users.filter((u) => u.roles?.includes('manager') || u.roles?.includes('admin') || u.role === 'manager');
   purchasers.forEach((u) => {
     store.messages.push({
@@ -295,7 +263,7 @@ const addShortageToPurchase = (plan) => {
         <div>
           <h2 class="text-base font-black text-slate-900">برنامه پخت روزانه</h2>
           <p class="text-[11px] text-slate-500">
-            ثبت غذاهای روز و تعداد پخت، محاسبه مواد از رسپی، کنترل کسری و قطعی‌سازی — امکان ثبت برای ۷ روز آینده
+            ثبت برنامه → تأیید سرآشپز (رزرو مواد) → تأیید مدیر (مصرف از رزرو) — نیاز با احتساب پرتی
           </p>
         </div>
       </div>
@@ -311,7 +279,7 @@ const addShortageToPurchase = (plan) => {
           <h3 class="text-sm font-black text-slate-800 flex items-center gap-2">
             <Pencil v-if="editId" class="w-4 h-4 text-amber-600" />
             <Plus v-else class="w-4 h-4 text-teal-600" />
-            {{ editId ? 'ویرایش برنامه موقت' : 'ثبت برنامه پخت جدید' }}
+            {{ editId ? 'ویرایش برنامه (در انتظار تأیید)' : 'ثبت برنامه پخت جدید' }}
           </h3>
 
           <div>
@@ -386,7 +354,7 @@ const addShortageToPurchase = (plan) => {
             <div class="text-xs font-black flex items-center gap-1.5" :class="formShortage.hasShortage ? 'text-rose-800' : 'text-emerald-800'">
               <AlertTriangle v-if="formShortage.hasShortage" class="w-4 h-4" />
               <CheckCircle2 v-else class="w-4 h-4" />
-              {{ formShortage.hasShortage ? 'کسری مواد برای این برنامه:' : 'موجودی انبار برای این برنامه کافی است' }}
+              {{ formShortage.hasShortage ? 'کسری مواد برای این برنامه:' : 'موجودی قابل استفاده برای این برنامه کافی است' }}
               <button
                 v-if="formShortage.hasShortage"
                 class="mr-auto inline-flex items-center gap-1 px-3 py-1.5 rounded-xl text-[10px] font-black bg-teal-600 text-white hover:bg-teal-700 transition shadow-sm"
@@ -415,9 +383,9 @@ const addShortageToPurchase = (plan) => {
           <div class="flex gap-2">
             <button
               class="flex-1 px-6 py-3 bg-teal-600 hover:bg-teal-700 text-white rounded-xl text-sm font-black transition shadow-md shadow-teal-600/20 flex items-center justify-center gap-2"
-              @click="submitPlan"
+              @click="editId ? saveEdit() : submitPlan()"
             >
-              <CheckCircle2 class="w-4 h-4" /> {{ editId ? 'ذخیره ویرایش (موقت)' : 'ثبت برنامه (موقت)' }}
+              <CheckCircle2 class="w-4 h-4" /> {{ editId ? 'ذخیره ویرایش' : 'ثبت برنامه' }}
             </button>
             <button
               v-if="editId || items.length > 0"
@@ -430,7 +398,7 @@ const addShortageToPurchase = (plan) => {
         </div>
       </div>
 
-      <!-- لیست برنامه‌ها — در همه حالت‌ها نمایش داده می‌شود تا وضعیت موقت/کسری/قطعی قابل مشاهده باشد -->
+      <!-- لیست برنامه‌ها -->
       <div class="lg:col-span-7 space-y-4">
         <div v-if="sortedPlansView.length === 0" class="bg-white rounded-2xl border border-slate-200 p-10 text-center text-slate-400 text-xs font-bold">
           هنوز برنامه پختی ثبت نشده است
@@ -440,26 +408,25 @@ const addShortageToPurchase = (plan) => {
           v-else
           :key="row.p.id"
           class="bg-white rounded-2xl border overflow-hidden"
-          :class="row.p.status === 'final' ? 'border-emerald-200' : row.sh.hasShortage ? 'border-rose-300' : 'border-slate-200'"
+          :class="row.p.status === 'approved' ? 'border-emerald-200' : row.p.status === 'reserved' ? 'border-sky-200' : row.sh.hasShortage ? 'border-rose-300' : 'border-slate-200'"
         >
           <!-- سربرگ برنامه -->
           <div
             class="p-4 border-b flex flex-wrap items-center justify-between gap-2"
-            :class="row.p.status === 'final' ? 'bg-emerald-50/50 border-emerald-100' : row.sh.hasShortage ? 'bg-rose-50/40 border-rose-100' : 'bg-amber-50/40 border-amber-100'"
+            :class="row.p.status === 'approved' ? 'bg-emerald-50/50 border-emerald-100' : row.p.status === 'reserved' ? 'bg-sky-50/40 border-sky-100' : 'bg-amber-50/40 border-amber-100'"
           >
             <div class="flex items-center gap-2 flex-wrap">
               <span class="text-sm font-black text-slate-800">برنامه {{ faDatePretty(row.p.date) }}</span>
               <span v-if="row.p.date === today" class="text-[9px] font-black bg-teal-100 text-teal-800 px-2 py-0.5 rounded-full">امروز</span>
               <span v-if="row.p.date > today" class="text-[9px] font-black bg-sky-100 text-sky-800 px-2 py-0.5 rounded-full">آینده</span>
-              <!-- وضعیت -->
-              <span v-if="row.p.status === 'final'" class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-black bg-emerald-100 text-emerald-800 border border-emerald-200">
-                <CheckCircle2 class="w-3 h-3" /> قطعی{{ row.p.stockDeducted ? ' · کسر شده' : ' · بدون کسر' }}
+              <!-- وضعیت جدید -->
+              <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-black border" :class="statusMeta(row.p).cls">
+                <CheckCircle2 v-if="row.p.status === 'approved'" class="w-3 h-3" />
+                <Clock3 v-else class="w-3 h-3" />
+                {{ statusMeta(row.p).label }}
               </span>
-              <span v-else class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-black bg-amber-100 text-amber-800 border border-amber-200">
-                <Clock3 class="w-3 h-3" /> موقت
-              </span>
-              <!-- کسری: مشاهده + ارسال به درخواست خرید -->
-              <template v-if="row.p.status === 'temp' && row.sh.hasShortage">
+              <!-- کسری -->
+              <template v-if="row.p.status === 'pending' && row.sh.hasShortage">
                 <button
                   class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-black bg-rose-100 text-rose-800 border border-rose-300 hover:bg-rose-200 transition"
                   title="مشاهده جزئیات کسری"
@@ -477,27 +444,31 @@ const addShortageToPurchase = (plan) => {
               </template>
             </div>
             <div class="flex items-center gap-1.5">
-              <template v-if="row.p.status === 'temp'">
+              <template v-if="row.p.status === 'pending'">
                 <button title="ویرایش" class="p-2 text-slate-500 hover:text-emerald-600 hover:bg-emerald-50 rounded-xl transition" @click="startEdit(row.p)">
                   <Pencil class="w-4 h-4" />
                 </button>
                 <button
-                  :disabled="row.sh.hasShortage"
-                  :title="row.sh.hasShortage ? 'کسری مواد موجود است — قطعی امکان‌پذیر نیست' : 'قطعی کردن برنامه'"
-                  class="px-3.5 py-2 rounded-xl text-[11px] font-black flex items-center gap-1.5 transition"
-                  :class="row.sh.hasShortage ? 'bg-slate-200 text-slate-400 cursor-not-allowed' : 'bg-emerald-600 hover:bg-emerald-700 text-white'"
-                  @click="row.sh.hasShortage
-                    ? showToast('به دلیل کسری مواد، برنامه فقط در حالت موقت می‌ماند؛ ابتدا کسری را جبران کنید', 'error')
-                    : (confirmFinalize = row.p)"
+                  title="تأیید سرآشپز در کارتابل انجام می‌شود"
+                  class="px-3.5 py-2 rounded-xl text-[11px] font-black flex items-center gap-1.5 transition bg-sky-100 text-sky-800 hover:bg-sky-200"
+                  @click="store.navigate('cartable', 'cookplan')"
                 >
-                  <CheckCheck class="w-4 h-4" /> قطعی کردن{{ row.sh.hasShortage ? ' (کسری)' : '' }}
+                  <CheckCheck class="w-4 h-4" /> تأیید در کارتابل
                 </button>
               </template>
               <button
-                :title="canDeletePlan(row.p) ? 'حذف برنامه' : 'حذف کل مجاز نیست'"
-                class="p-2 rounded-xl transition"
-                :class="canDeletePlan(row.p) ? 'text-slate-500 hover:text-rose-600 hover:bg-rose-50' : 'text-slate-300 cursor-not-allowed'"
-                @click="canDeletePlan(row.p) ? (confirmDelete = row.p) : showToast('برای این تاریخ فاکتور صادر شده؛ فقط حذف غذای مشخص مجاز است', 'error')"
+                v-if="row.p.status === 'reserved'"
+                title="تأیید نهایی مدیر در کارتابل انجام می‌شود"
+                class="px-3.5 py-2 rounded-xl text-[11px] font-black flex items-center gap-1.5 transition bg-indigo-100 text-indigo-800 hover:bg-indigo-200"
+                @click="store.navigate('cartable', 'cookplan')"
+              >
+                <CheckCheck class="w-4 h-4" /> تأیید مدیر در کارتابل
+              </button>
+              <button
+                v-if="canDeletePlan(row.p)"
+                title="لغو برنامه"
+                class="p-2 rounded-xl transition text-slate-500 hover:text-rose-600 hover:bg-rose-50"
+                @click="confirmDelete = row.p"
               >
                 <Trash2 class="w-4 h-4" />
               </button>
@@ -512,7 +483,7 @@ const addShortageToPurchase = (plan) => {
                 <th class="p-3">غذا</th>
                 <th class="p-3 text-center w-20">پرس</th>
                 <th class="p-3 text-center">رسپی</th>
-                <th class="p-3 text-center w-24">حذف غذا</th>
+                <th v-if="row.p.status === 'pending'" class="p-3 text-center w-24">حذف غذا</th>
               </tr>
             </thead>
             <tbody class="divide-y divide-slate-100">
@@ -528,6 +499,10 @@ const addShortageToPurchase = (plan) => {
                     فاکتور شده
                   </span>
                   <span v-if="!recipeOf(it.dishId)" class="mr-1.5 text-[9px] font-black bg-rose-100 text-rose-700 px-2 py-0.5 rounded-full">بدون رسپی</span>
+                  <span v-if="it.decision === 'reject'" class="mr-1.5 text-[9px] font-black bg-rose-100 text-rose-700 px-2 py-0.5 rounded-full" :title="it.rejectReason">
+                    رد شده{{ it.rejectReason ? ` — ${it.rejectReason}` : '' }}
+                  </span>
+                  <span v-else-if="it.decision === 'approve'" class="mr-1.5 text-[9px] font-black bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full">تایید</span>
                 </td>
                 <td class="p-3 text-center font-black text-teal-700">{{ toFa(it.qty) }}</td>
                 <td class="p-3 text-center">
@@ -536,9 +511,9 @@ const addShortageToPurchase = (plan) => {
                   </button>
                   <template v-else>—</template>
                 </td>
-                <td class="p-3 text-center">
+                <td v-if="row.p.status === 'pending'" class="p-3 text-center">
                   <button
-                    :title="row.sold.has(it.dishId) ? 'حذف این غذا (فاکتور خورده — با تأیید)' : 'حذف این غذا از برنامه'"
+                    title="حذف این غذا از برنامه"
                     class="p-1.5 text-rose-500 hover:text-rose-700 hover:bg-rose-50 rounded-lg transition"
                     @click="confirmRemoveDish = { plan: row.p, dishId: it.dishId, dishName: it.dishName }"
                   >
@@ -552,76 +527,29 @@ const addShortageToPurchase = (plan) => {
           <!-- پانوشت -->
           <div class="px-4 py-2.5 bg-slate-50 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-500">
             <span>ثبت: {{ row.p.createdBy }} — {{ toFa(row.p.createdAt) }}</span>
-            <span v-if="row.p.finalizedAt">قطعی: {{ row.p.finalizedBy }} — {{ toFa(row.p.finalizedAt) }}</span>
-            <span v-if="row.p.status === 'final' && !row.p.stockDeducted" class="font-black text-amber-700">کسر مواد به‌صورت دستی از خروج کالا انجام شود</span>
+            <span v-if="row.p.reservedAt">رزرو: {{ row.p.reservedBy }} — {{ toFa(row.p.reservedAt) }}</span>
+            <span v-if="row.p.approvedAt">تأیید نهایی: {{ row.p.approvedBy }} — {{ toFa(row.p.approvedAt) }}</span>
+            <span v-if="row.p.status === 'reserved' && row.p.reservationExpiresAt" class="font-bold text-sky-700">
+              مهلت رزرو: {{ toFa(Math.max(0, Math.ceil((row.p.reservationExpiresAt - Date.now()) / 3600000))) }} ساعت باقی‌مانده
+            </span>
           </div>
         </div>
       </div>
     </div>
 
-    <!-- ===== مودال تأیید قطعی ===== -->
-    <Modal
-      v-if="confirmFinalize && finalizeShortage"
-      :title="`قطعی کردن برنامه ${faDatePretty(confirmFinalize.date)}`"
-      @close="confirmFinalize = null"
-    >
+    <!-- ===== مودال تأیید لغو برنامه ===== -->
+    <Modal v-if="confirmDelete" title="تأیید لغو برنامه" @close="confirmDelete = null">
       <div class="space-y-3 text-xs text-slate-700">
         <p class="font-bold leading-relaxed">
-          با قطعی کردن، برنامه به وضعیت قطعی می‌رود
-          {{ confirmFinalize.deductStock ? ' و مواد غذایی از انبار کسر می‌شود.' : ' اما از انبار کسری نمی‌شود (کسر دستی).' }}
+          برنامه «{{ faDatePretty(confirmDelete.date) }}» با {{ toFa(confirmDelete.items.length) }} غذا لغو شود؟
         </p>
-        <div class="rounded-2xl p-3 border" :class="finalizeShortage.hasShortage ? 'bg-rose-50 border-rose-300' : 'bg-emerald-50 border-emerald-200'">
-          <div class="font-black mb-2 flex items-center gap-1.5" :class="finalizeShortage.hasShortage ? 'text-rose-800' : 'text-emerald-800'">
-            <AlertTriangle v-if="finalizeShortage.hasShortage" class="w-4 h-4" />
-            <CheckCircle2 v-else class="w-4 h-4" />
-            {{ finalizeShortage.hasShortage ? 'کسری مواد — ابتدا جبران کنید:' : 'موجودی برای تمام مواد کافی است' }}
-          </div>
-          <div class="space-y-1.5 max-h-48 overflow-y-auto">
-            <div
-              v-for="r in finalizeShortage.rows"
-              :key="r.ingId"
-              class="flex justify-between rounded-xl px-3 py-1.5 border text-[11px]"
-              :class="r.ok ? 'bg-white border-emerald-100' : 'bg-rose-100 border-rose-300 font-black text-rose-900'"
-            >
-              <span>{{ r.name }}</span>
-              <span>
-                نیاز: {{ toFa(Math.round(r.need * 1000) / 1000) }} {{ r.unit }} · موجودی: {{ toFa(Math.round(r.stock * 1000) / 1000) }}
-                <template v-if="!r.ok"> · کسری: {{ toFa(Math.round(r.shortage * 1000) / 1000) }}</template>
-              </span>
-            </div>
-          </div>
-        </div>
-        <div v-if="confirmFinalize.deductStock && !confirmFinalize.stockDeducted" class="bg-sky-50 border border-sky-200 rounded-2xl p-3 text-[11px] font-bold text-sky-900">
-          با تأیید این پنجره، مواد به همان اندازه از موجودی انبار کسر می‌شود.
+        <div class="bg-amber-50 border border-amber-200 rounded-2xl p-3 text-[11px] font-bold text-amber-900">
+          برنامه لغو‌شده از لیست حذف نمی‌شود اما غیرفعال می‌گردد.
         </div>
       </div>
       <template #footer>
         <div class="flex gap-2">
-          <button
-            :disabled="finalizeShortage.hasShortage"
-            class="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 disabled:pointer-events-none text-white rounded-xl text-xs font-black transition"
-            @click="doFinalize(confirmFinalize)"
-          >
-            {{ finalizeShortage.hasShortage ? 'قطعی ممکن نیست — کسری وجود دارد' : 'بله، قطعی کن' }}
-          </button>
-          <button class="flex-1 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition" @click="confirmFinalize = null">انصراف</button>
-        </div>
-      </template>
-    </Modal>
-
-    <!-- ===== مودال تأیید حذف کل برنامه ===== -->
-    <Modal v-if="confirmDelete" title="تأیید حذف برنامه" @close="confirmDelete = null">
-      <div class="space-y-3 text-xs text-slate-700">
-        <p class="font-bold leading-relaxed">
-          برنامه «{{ faDatePretty(confirmDelete.date) }}» با {{ toFa(confirmDelete.items.length) }} غذا حذف شود؟
-        </p>
-        <div v-if="confirmDelete.status === 'final' && confirmDelete.stockDeducted" class="bg-amber-50 border border-amber-200 rounded-2xl p-3 text-[11px] font-bold text-amber-900">
-          این برنامه قطعی شده و مواد آن از انبار کسر شده است؛ با حذف، مواد به انبار برمی‌گردد.
-        </div>
-      </div>
-      <template #footer>
-        <div class="flex gap-2">
-          <button class="flex-1 py-2.5 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-black transition" @click="doDeletePlan(confirmDelete)">بله، حذف کن</button>
+          <button class="flex-1 py-2.5 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-black transition" @click="doDeletePlan(confirmDelete)">بله، لغو کن</button>
           <button class="flex-1 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition" @click="confirmDelete = null">انصراف</button>
         </div>
       </template>
@@ -632,9 +560,6 @@ const addShortageToPurchase = (plan) => {
       <p class="text-xs font-bold text-slate-700 leading-relaxed">
         غذای «{{ confirmRemoveDish.dishName }}» از برنامه {{ faDatePretty(confirmRemoveDish.plan.date) }} حذف شود؟
       </p>
-      <div v-if="confirmRemoveDish.plan.status === 'final' && confirmRemoveDish.plan.stockDeducted" class="mt-3 bg-amber-50 border border-amber-200 rounded-2xl p-3 text-[11px] font-bold text-amber-900">
-        مواد این غذا به انبار برگردانده می‌شود.
-      </div>
       <template #footer>
         <div class="flex gap-2">
           <button class="flex-1 py-2.5 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-black transition" @click="doRemoveDish(confirmRemoveDish)">بله، حذف کن</button>
@@ -651,8 +576,10 @@ const addShortageToPurchase = (plan) => {
             <tr>
               <th class="p-3">#</th>
               <th class="p-3">ماده غذایی</th>
-              <th class="p-3 text-center">نیاز برنامه</th>
-              <th class="p-3 text-center">موجودی انبار</th>
+              <th class="p-3 text-center">نیاز (با پرتی)</th>
+              <th class="p-3 text-center">موجودی فیزیکی</th>
+              <th class="p-3 text-center">رزرو شده</th>
+              <th class="p-3 text-center">قابل استفاده</th>
               <th class="p-3 text-center">وضعیت</th>
             </tr>
           </thead>
@@ -662,6 +589,8 @@ const addShortageToPurchase = (plan) => {
               <td class="p-3 font-black" :class="r.ok ? 'text-slate-800' : 'text-rose-900'">{{ r.name }}</td>
               <td class="p-3 text-center font-bold">{{ toFa(Math.round(r.need * 1000) / 1000) }} {{ r.unit }}</td>
               <td class="p-3 text-center">{{ toFa(Math.round(r.stock * 1000) / 1000) }}</td>
+              <td class="p-3 text-center text-sky-700 font-bold">{{ toFa(Math.round(r.reserved * 1000) / 1000) }}</td>
+              <td class="p-3 text-center font-bold text-emerald-700">{{ toFa(Math.round(r.available * 1000) / 1000) }}</td>
               <td class="p-3 text-center">
                 <span v-if="r.ok" class="text-[10px] font-black bg-emerald-100 text-emerald-800 px-2.5 py-1 rounded-full">کافی</span>
                 <span v-else class="text-[10px] font-black bg-rose-100 text-rose-800 px-2.5 py-1 rounded-full">کسری: {{ toFa(Math.round(r.shortage * 1000) / 1000) }} {{ r.unit }}</span>

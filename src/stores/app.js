@@ -7,6 +7,7 @@ import {
   INITIAL_USERS, INITIAL_UNITS, INITIAL_CUSTOMERS, INITIAL_DISHES,
   INITIAL_INGREDIENTS, INITIAL_RECIPES, INITIAL_STOCK_MOVES, INITIAL_INVOICES,
   INITIAL_SETTINGS, INITIAL_SUPPLIES, INITIAL_OVERHEADS, INITIAL_ROLES,
+  INITIAL_REJECTION_REASONS,
 } from '../lib/seed.js';
 
 // نقش‌های ذخیره‌شده را با نسخه فعلی seed ادغام می‌کند تا کلیدهای مجوز
@@ -17,6 +18,76 @@ function mergeRoles(stored) {
     if (!fresh) return r;
     return { ...fresh, ...r, permissions: { ...fresh.permissions, ...(r.permissions || {}) } };
   });
+}
+
+// ===== مهاجرت داده‌های موجود (فاز ۱) — داده‌های کاربر از دست نمی‌روند =====
+export function migrateData(data) {
+  // ingredients/supplies: فیلد رزرو
+  if (Array.isArray(data.ingredients)) {
+    data.ingredients = data.ingredients.map((i) => ({ ...i, reserved: Number(i.reserved) || 0 }));
+  }
+  if (Array.isArray(data.supplies)) {
+    data.supplies = data.supplies.map((s) => ({ ...s, reserved: Number(s.reserved) || 0 }));
+  }
+  // moves: userId/byDisplayName از person استخراج می‌شود (باز طراحی فیلدها — فاز ۱)
+  if (Array.isArray(data.moves)) {
+    data.moves = data.moves.map((m) => ({
+      ...m,
+      kind: m.kind || (m.ingredientId ? 'ingredient' : 'supply'),
+      userId: m.userId || '',
+      byUsername: m.byUsername || '',
+      byRole: m.byRole || '',
+      byDisplayName: m.byDisplayName || m.person || '—',
+      refType: m.refType || '',
+      refId: m.refId || '',
+    }));
+  }
+  // plans: وضعیت‌های قدیمی → ماشین حالت جدید
+  if (Array.isArray(data.plans)) {
+    data.plans = data.plans.map((p) => ({
+      ...p,
+      status: p.status === 'temp' ? 'pending' : p.status === 'final' ? 'approved' : p.status,
+      items: Array.isArray(p.items)
+        ? p.items.map((it) => ({
+            ...it,
+            decision: it.decision || 'pending',
+            approvedQty: it.approvedQty ?? null,
+            rejectReason: it.rejectReason || '',
+            decisionNote: it.decisionNote || '',
+          }))
+        : p.items,
+      createdBy: p.createdBy || '—',
+      reservedBy: p.reservedBy ?? null,
+      reservedAt: p.reservedAt ?? null,
+      approvedBy: p.approvedBy ?? null,
+      approvedAt: p.approvedAt ?? null,
+      rejectedBy: p.rejectedBy ?? null,
+      rejectedAt: p.rejectedAt ?? null,
+      rejectReason: p.rejectReason || '',
+      cancelledBy: p.cancelledBy ?? null,
+      cancelledAt: p.cancelledAt ?? null,
+      cancelReason: p.cancelReason || '',
+      reservationExpiresAt: p.reservationExpiresAt ?? null,
+      reservationReleasedAt: p.reservationReleasedAt ?? null,
+      deductStock: p.deductStock !== false,
+    }));
+  }
+  // purchaseRequests / stockRequests: فیلدهای دلیل رد
+  ['purchaseRequests', 'stockRequests'].forEach((k) => {
+    if (Array.isArray(data[k])) {
+      data[k] = data[k].map((r) => ({
+        ...r,
+        items: Array.isArray(r.items)
+          ? r.items.map((it) => ({ ...it, rejectReason: it.rejectReason || '', decisionNote: it.decisionNote || '' }))
+          : r.items,
+      }));
+    }
+  });
+  // settings: timeout رزرو
+  if (data.settings && typeof data.settings === 'object') {
+    if (data.settings.reservationTimeoutHours === undefined) data.settings.reservationTimeoutHours = 24;
+  }
+  return data;
 }
 
 export const useAppStore = defineStore('app', {
@@ -42,6 +113,7 @@ export const useAppStore = defineStore('app', {
     purchaseRequests: safeStorage.get('kitchen_purchase_requests', []),
     stockRequests: safeStorage.get('kitchen_stock_requests', []),
     messages: safeStorage.get('kitchen_messages', []),
+    rejectionReasons: safeStorage.get('kitchen_rejection_reasons', INITIAL_REJECTION_REASONS),
 
     // ناوبری
     page: 'dashboard',
@@ -130,7 +202,7 @@ export const useAppStore = defineStore('app', {
 const PERSIST = [
   'users', 'roles', 'customers', 'dishes', 'ingredients', 'recipes', 'units',
   'invoices', 'moves', 'settings', 'supplies', 'plans', 'overheads',
-  'preinvoices', 'purchaseRequests', 'stockRequests', 'messages',
+  'preinvoices', 'purchaseRequests', 'stockRequests', 'messages', 'rejectionReasons',
 ];
 const KEY_MAP = {
   users: 'kitchen_users', roles: 'kitchen_roles', customers: 'kitchen_customers',
@@ -139,13 +211,35 @@ const KEY_MAP = {
   settings: 'kitchen_settings', supplies: 'kitchen_supplies', plans: 'kitchen_plans',
   overheads: 'kitchen_overheads', preinvoices: 'kitchen_preinvoices',
   purchaseRequests: 'kitchen_purchase_requests', stockRequests: 'kitchen_stock_requests',
-  messages: 'kitchen_messages',
+  messages: 'kitchen_messages', rejectionReasons: 'kitchen_rejection_reasons',
 };
 
 export function setupPersistence(store) {
+  // مهاجرت داده‌های موجود — یک‌بار در شروع (داده کاربر حفظ می‌شود)
+  const migrated = migrateData({
+    ingredients: store.ingredients,
+    supplies: store.supplies,
+    moves: store.moves,
+    plans: store.plans,
+    purchaseRequests: store.purchaseRequests,
+    stockRequests: store.stockRequests,
+    settings: store.settings,
+  });
+  Object.assign(store, migrated);
+
   store.$subscribe(() => {
     PERSIST.forEach((key) => safeStorage.set(KEY_MAP[key], store[key]));
     if (store.currentUser) safeStorage.set('kitchen_currentUser', store.currentUser);
     else safeStorage.remove('kitchen_currentUser');
   }, { flush: 'sync' });
+
+  // کنترل انقضای رزروها: در شروع و هر ۶۰ ثانیه
+  const runTimeoutCheck = () => {
+    import('../lib/inventory.js').then(({ checkExpiredReservations }) => {
+      const n = checkExpiredReservations(store);
+      if (n > 0) store.showToast(`${n} رزرو منقضی شده خودکار آزاد شد`, 'info');
+    });
+  };
+  runTimeoutCheck();
+  setInterval(runTimeoutCheck, 60_000);
 }

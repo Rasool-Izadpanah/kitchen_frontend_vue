@@ -160,6 +160,17 @@ export const FONT_OPTIONS = [
   { id: 'Parastoo', label: 'پرستو' },
 ];
 
+// دلایل رد آماده (قابل مدیریت در تنظیمات — فاز ۱)
+export const INITIAL_REJECTION_REASONS = [
+  { id: 'rr1', text: 'موجودی انبار کافی نیست', category: 'cookplan' },
+  { id: 'rr2', text: 'تعداد پخت با ظرفیت آشپزخانه همخوانی ندارد', category: 'cookplan' },
+  { id: 'rr3', text: 'مواد به‌موقع تأمین نشد', category: 'purchase' },
+  { id: 'rr4', text: 'کیفیت کالای تحویلی نامناسب بود', category: 'grn' },
+  { id: 'rr5', text: 'مغایرت مقدار با سفارش', category: 'grn' },
+  { id: 'rr6', text: 'درخواست خارج از زمان مجاز', category: 'stockout' },
+  { id: 'rr7', text: 'سایر (توضیح در یادداشت)', category: 'cookplan' },
+];
+
 // ===== سیستم نقش‌ها و مجوزها =====
 // کاتالوگ مجوزهای قابل انتخاب هنگام تعریف نقش
 export const PERMISSIONS = [
@@ -168,10 +179,14 @@ export const PERMISSIONS = [
   { key: 'edit_request_preinvoice', label: 'ویرایش مقادیر درخواست در کارتابل — پیش‌فاکتور', group: 'کارتابل' },
   { key: 'edit_request_purchase', label: 'ویرایش مقادیر درخواست در کارتابل — درخواست خرید کالا', group: 'کارتابل' },
   { key: 'edit_request_stockout', label: 'ویرایش مقادیر درخواست در کارتابل — درخواست کالا از انبار', group: 'کارتابل' },
+  { key: 'approve_cookplan', label: 'تأیید برنامه پخت و رزرو مواد (سرآشپز)', group: 'کارتابل' },
+  { key: 'final_approve_cookplan', label: 'تأیید نهایی برنامه پخت و مصرف مواد (مدیر)', group: 'کارتابل' },
+  { key: 'reject_cookplan', label: 'رد برنامه پخت', group: 'کارتابل' },
   { key: 'dailycook', label: 'برنامه پخت روزانه', group: 'عملیات' },
   { key: 'create_invoice', label: 'صدور فاکتور فروش', group: 'عملیات' },
   { key: 'edit_preinvoice', label: 'ویرایش پیش‌فاکتور', group: 'عملیات' },
   { key: 'view_warehouse', label: 'ورود و خروج انبار', group: 'عملیات' },
+  { key: 'view_reservations', label: 'مشاهده رزروهای انبار', group: 'انبار' },
   { key: 'view_reports', label: 'مشاهده گزارش‌ها', group: 'گزارش' },
   { key: 'print_reports', label: 'چاپ گزارش‌ها', group: 'گزارش' },
   { key: 'manage_customers', label: 'تعریف مشتری', group: 'تعاریف' },
@@ -179,7 +194,9 @@ export const PERMISSIONS = [
   { key: 'manage_ingredients', label: 'تعریف ماده غذایی', group: 'تعاریف' },
   { key: 'manage_recipes', label: 'تعریف رسپی', group: 'تعاریف' },
   { key: 'manage_supplies', label: 'تعریف اقلام جانبی', group: 'تعاریف' },
+  { key: 'manage_rejection_reasons', label: 'مدیریت دلایل رد', group: 'تعاریف' },
   { key: 'manage_settings', label: 'تنظیمات پایه (واحد، مالیات، فونت و...)', group: 'سیستم' },
+  { key: 'manage_reservation_timeout', label: 'تنظیم Timeout رزرو', group: 'سیستم' },
   { key: 'edit_users', label: 'تعریف و ویرایش کاربران', group: 'سیستم' },
   { key: 'manage_roles', label: 'تعریف نقش‌ها و مجوزها', group: 'سیستم' },
 ];
@@ -197,18 +214,21 @@ export const INITIAL_ROLES = [
       view_warehouse: true, view_reports: true, print_reports: true,
       manage_customers: true, manage_dishes: true, manage_ingredients: true,
       manage_recipes: true, manage_supplies: true,
+      final_approve_cookplan: true, reject_cookplan: true, view_reservations: true,
     }
   },
   {
     id: 'chef', name: 'سرآشپز', system: false, permissions: {
       ...allPerms(false),
       view_dashboard: true, dailycook: true, view_reports: true,
+      approve_cookplan: true,
     }
   },
   {
     id: 'storekeeper', name: 'انباردار', system: false, permissions: {
       ...allPerms(false),
       view_dashboard: true, view_warehouse: true, view_reports: true,
+      view_reservations: true,
     }
   },
 ];

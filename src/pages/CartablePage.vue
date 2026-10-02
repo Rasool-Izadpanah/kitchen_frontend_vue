@@ -9,6 +9,7 @@ import {
   Check, X, Eye, CheckCheck, Bell, MessageSquare, AlertTriangle, Trash2, Pencil, Printer,
 } from 'lucide-vue-next';
 import { toFa, formatMoney, jalaliTodayString, nowTime, uid, auditEntry, userDisplay } from '../lib/utils.js';
+import { applyInventoryOp, calcNeedsWithWaste, shortageOnAvailable } from '../lib/inventory.js';
 import { useAppStore } from '../stores/app.js';
 
 const props = defineProps({
@@ -198,9 +199,11 @@ const confirmDelivery = (row) => {
 };
 
 /* ===== rows assembly ===== */
-const cookplanRows = computed(() => (store.plans || []).filter((p) => p.status === 'temp').map((p) => ({
+// برنامه‌ها: pending → تأیید سرآشپز | reserved → تأیید/رد مدیر
+const cookplanRows = computed(() => (store.plans || []).filter((p) => p.status === 'pending' || p.status === 'reserved').map((p) => ({
   key: `cp-${p.id}`, type: 'cookplan', id: p.id, title: `برنامه پخت ${p.date}`,
   date: p.date, time: p.createdAtTime || '', by: p.createdBy || '—',
+  stage: p.status, // 'pending' | 'reserved'
   items: p.items.map((it) => ({ name: it.dishName, qty: it.qty, unit: 'پرس', decision: it.decision })),
   raw: p,
 })));
@@ -284,74 +287,111 @@ const rejectPreInvoice = (row) => {
   toast(`پیش‌فاکتور ${toFa(p.id)} ابطال شد`);
 };
 
-const applyCookPlan = (row, decision) => {
+/* ===== برنامه پخت — ماشین حالت دو مرحله‌ای (فاز ۱) =====
+ * pending (ثبت سرآشپز) ──تأیید سرآشپز──▶ reserved (رزرو مواد)
+ * reserved ──تأیید مدیر──▶ approved (consume) | ──رد مدیر──▶ rejected (release)
+ */
+const calcNeedsForItems = (planItems) => calcNeedsWithWaste(store, planItems);
+
+const applyCookPlan = (row, decision, reason = '', decisionNote = '') => {
   const p = row.raw;
-  const tickedIdx = new Set(p.items.map((_, i) => i).filter((i) => checked.value[row.key]?.[i]));
-  if (tickedIdx.size === 0) return toast('حداقل یک قلم را تیک بزنید یا «تایید نهایی» را بزنید', 'error');
-  if (p.items.some((it, i) => tickedIdx.has(i) && it.decision && it.decision !== 'pending')) return toast('اقلام تعیین‌تکلیف‌شده قابل تغییر نیستند', 'error');
+  const user = store.currentUser;
 
-  const updatedItems = p.items.map((it, i) => (tickedIdx.has(i) ? { ...it, decision, decidedAt: `${jalaliTodayString()} ${toFa(nowTime())}`, decidedBy: props.userName } : it));
-  const allDecided = updatedItems.every((it) => it.decision === 'approve' || it.decision === 'reject');
-  const approvedCount = updatedItems.filter((it) => it.decision === 'approve').length;
-  const rejectedCount = updatedItems.filter((it) => it.decision === 'reject').length;
-  const pendingCount = updatedItems.length - approvedCount - rejectedCount;
+  // ─── مرحله ۱: تأیید سرآشپز → رزرو ───
+  if (p.status === 'pending') {
+    if (!store.can('approve_cookplan')) return toast('شما مجوز تأیید برنامه پخت را ندارید', 'error');
+    if (decision !== 'approve') return toast('در این مرحله فقط تأیید (و رزرو) ممکن است؛ برای رد، ابتدا تأیید سرآشپز انجام شود', 'error');
 
-  // کسر فوری مواد غذاهای تاییدشده (در هر مرحله تایید — نه فقط نهایی)
-  if (decision === 'approve') {
-    const approvedDishes = p.items.filter((_, i) => tickedIdx.has(i));
-    const needs = {};
-    approvedDishes.forEach((it) => {
-      const rec = (store.recipes || []).find((r) => r.dishId === it.dishId);
-      if (!rec) return;
-      rec.items.forEach((ri) => {
-        if (!needs[ri.ingredientId]) needs[ri.ingredientId] = { name: ri.name, unit: ri.unit, need: 0 };
-        needs[ri.ingredientId].need += ri.qty * it.qty;
-      });
-    });
-    // کنترل کسری: تایید قلمی که موجودی‌اش کفاف نمی‌دهد ممنوع است (جلوگیری از منفی شدن انبار)
-    const shortItems = Object.entries(needs)
-      .map(([ingId, n]) => ({ ...n, stock: store.ingredients.find((i) => i.id === ingId)?.qty ?? 0 }))
-      .filter((n) => n.stock < n.need);
-    if (shortItems.length > 0) {
-      return toast(`موجودی انبار کافی نیست: ${shortItems.map((s) => `${s.name} (موجودی ${toFa(Math.round(s.stock * 100) / 100)}، نیاز ${toFa(Math.round(s.need * 100) / 100)})`).join('، ')} — ابتدا کسری را از طریق درخواست خرید جبران کنید`, 'error');
+    const tickedIdx = new Set(p.items.map((_, i) => i).filter((i) => checked.value[row.key]?.[i]));
+    if (tickedIdx.size === 0) return toast('حداقل یک قلم را تیک بزنید', 'error');
+    if (p.items.some((it, i) => tickedIdx.has(i) && it.decision === 'reject')) return toast('اقلام رد‌شده قابل تأیید نیستند', 'error');
+
+    const updatedItems = p.items.map((it, i) => (tickedIdx.has(i)
+      ? { ...it, decision: 'approve', approvedQty: it.qty, decidedAt: `${jalaliTodayString()} ${toFa(nowTime())}`, decidedBy: props.userName, decisionNote }
+      : it));
+    const approvedItems = updatedItems.filter((it) => it.decision === 'approve');
+
+    // کسری بر مبنای موجودی قابل استفاده (qty - reserved)
+    const approvedDishes = approvedItems.map((it) => ({ dishId: it.dishId, qty: it.qty }));
+    const sh = shortageOnAvailable(store, approvedDishes);
+    if (sh.hasShortage) {
+      const list = sh.rows.filter((r) => !r.ok).map((s) => `${s.name} (قابل استفاده ${toFa(Math.round(s.available * 100) / 100)}، نیاز ${toFa(Math.round(s.need * 100) / 100)})`).join('، ');
+      return toast(`موجودی قابل استفاده کافی نیست: ${list} — ابتدا کسری را جبران کنید`, 'error');
     }
-    const deducted = Object.entries(needs);
-    if (deducted.length > 0) {
-      store.ingredients = store.ingredients.map((ing) => {
-        const n = needs[ing.id];
-        if (!n) return ing;
-        return { ...ing, qty: Math.max(0, Number((ing.qty - n.need).toFixed(3))) };
-      });
-      const newMoves = deducted.map(([ingId, n]) => ({
-        id: `m${Date.now()}_${Math.floor(Math.random() * 1000)}_${ingId}`,
-        date: jalaliTodayString(), time: toFa(nowTime()),
-        ingredientId: ingId, name: n.name, type: 'out', kind: 'ingredient',
-        qty: n.need, unit: n.unit,
-        desc: `پخت برنامه ${p.date} — تایید غذا`, person: props.userName || 'انباردار',
-        receiver: p.createdBy || '—', batchId: `B${Date.now().toString(36)}`,
-      }));
-      store.moves = [...newMoves, ...(store.moves || [])];
-    }
+
+    // رزرو مواد غذاهای تاییدشده
+    const needs = calcNeedsForItems(approvedDishes);
+    applyInventoryOp(store, needs, 'reserve', { user, plan: p, note: `رزرو — تأیید سرآشپز برنامه ${p.date}${decisionNote ? ` (${decisionNote})` : ''}` });
+
+    const timeoutH = Number(store.settings.reservationTimeoutHours) || 24;
+    const isFull = updatedItems.every((it) => it.decision === 'approve');
+    store.plans = store.plans.map((x) => (x.id === p.id
+      ? {
+          ...x,
+          items: updatedItems,
+          status: 'reserved',
+          reservedBy: props.userName,
+          reservedAt: `${jalaliTodayString()} ${nowTime()}`,
+          reservationExpiresAt: Date.now() + timeoutH * 3600000,
+          audit: [...(x.audit || []), auditEntry(user, `تأیید سرآشپز — رزرو مواد ${approvedItems.length} غذا برای ${toFa(timeoutH)} ساعت${reason ? ` — دلیل: ${reason}` : ''}`)],
+        }
+      : x));
+    pushMessage(p.createdBy, `برنامه پخت ${p.date} تأیید و مواد آن به مدت ${toFa(timeoutH)} ساعت رزرو شد — در انتظار تأیید نهایی مدیر.`, 'success');
+    toast(`مواد رزرو شد — در انتظار تأیید نهایی مدیر (مهلت: ${toFa(timeoutH)} ساعت)`);
+    checked.value = { ...checked.value, [row.key]: {} };
+    return;
   }
 
-  if (allDecided) {
+  // ─── مرحله ۲: تأیید/رد مدیر روی برنامه رزرو‌شده ───
+  if (p.status === 'reserved') {
     if (decision === 'approve') {
-      store.plans = store.plans.map((x) => (x.id === p.id ? { ...x, items: updatedItems, status: 'final', finalizedAt: `${jalaliTodayString()} ${nowTime()}`, finalizedBy: props.userName, approvedBy: props.userName, approvedAt: `${jalaliTodayString()} ${nowTime()}`, stockDeducted: true, audit: [...(x.audit || []), auditEntry(store.currentUser, `تایید نهایی برنامه — ${approvedCount} غذا تایید و ${rejectedCount} غذا رد شد`)] } : x));
-      pushMessage(p.createdBy, `برنامه پخت ${p.date} نهایی شد: ${toFa(approvedCount)} غذا تایید و ${toFa(rejectedCount)} غذا رد شد. مواد غذایی غذاهای تاییدشده از انبار کسر گردید.`, 'success');
-      toast('تایید نهایی انجام شد، مواد از انبار کسر شد و برنامه بسته شد');
+      if (!store.can('final_approve_cookplan')) return toast('شما مجوز تأیید نهایی برنامه پخت را ندارید', 'error');
     } else {
-      store.plans = store.plans.map((x) => (x.id === p.id ? { ...x, items: updatedItems, status: 'rejected', finalizedAt: `${jalaliTodayString()} ${nowTime()}`, finalizedBy: props.userName, audit: [...(x.audit || []), auditEntry(store.currentUser, 'رد نهایی برنامه — رزرو مواد آزاد شد')] } : x));
-      pushMessage(p.createdBy, `برنامه پخت ${p.date} رد شد و رزرو مواد آن آزاد گردید.`, 'danger');
-      toast('برنامه رد و رزرو آن آزاد شد');
+      if (!store.can('reject_cookplan')) return toast('شما مجوز رد برنامه پخت را ندارید', 'error');
+      if (!reason) return toast('ثبت دلیل رد الزامی است', 'error');
     }
-  } else {
-    store.plans = store.plans.map((x) => (x.id === p.id ? { ...x, items: updatedItems, status: 'temp', audit: [...(x.audit || []), auditEntry(store.currentUser, decision === 'approve' ? `تایید ${approvedCount} قلم و کسر فوری مواد` : `رد ${rejectedCount} قلم`)] } : x));
-    pushMessage(p.createdBy, `برنامه پخت ${p.date}: ${toFa(decision === 'approve' ? approvedCount : rejectedCount)} قلم ${decision === 'approve' ? 'تایید و مواد آن از انبار کسر شد' : 'رد شد'}؛ ${toFa(pendingCount)} قلم در انتظار تعیین تکلیف است.`, 'info');
-    toast(decision === 'approve'
-      ? `مواد غذایی ${toFa(approvedCount)} غذای تاییدشده بلافاصله از انبار کسر شد؛ ${toFa(pendingCount)} قلم بلاتکلیف ماند`
-      : `${toFa(rejectedCount)} قلم رد شد و به پایین جدول منتقل شد؛ ${toFa(pendingCount)} قلم بلاتکلیف در کارتابل ماند`);
+
+    const approvedItems = p.items.filter((it) => it.decision === 'approve');
+    const approvedDishes = approvedItems.map((it) => ({ dishId: it.dishId, qty: it.approvedQty || it.qty }));
+
+    if (decision === 'approve') {
+      // consume: از رزرو به مصرف
+      const needs = calcNeedsForItems(approvedDishes);
+      applyInventoryOp(store, needs, 'consume', { user, plan: p, note: `مصرف از رزرو — تأیید نهایی مدیر برنامه ${p.date}${reason ? ` (${reason})` : ''}` });
+      store.plans = store.plans.map((x) => (x.id === p.id
+        ? {
+            ...x,
+            status: 'approved',
+            approvedBy: props.userName,
+            approvedAt: `${jalaliTodayString()} ${nowTime()}`,
+            reservationExpiresAt: null,
+            stockDeducted: true,
+            audit: [...(x.audit || []), auditEntry(user, `تأیید نهایی مدیر — ${approvedItems.length} غذا مصرف شد${reason ? ` — دلیل: ${reason}` : ''}`)],
+          }
+        : x));
+      pushMessage(p.createdBy, `برنامه پخت ${p.date} به تأیید نهایی مدیر رسید و مواد رزرو‌شده مصرف شد.`, 'success');
+      toast('تأیید نهایی انجام شد — مواد از رزرو مصرف شد');
+    } else {
+      // release: آزادسازی رزرو
+      const needs = calcNeedsForItems(approvedDishes);
+      applyInventoryOp(store, needs, 'release', { user, plan: p, note: `آزادسازی رزرو — رد مدیر برنامه ${p.date} — دلیل: ${reason}` });
+      store.plans = store.plans.map((x) => (x.id === p.id
+        ? {
+            ...x,
+            status: 'rejected',
+            rejectedBy: props.userName,
+            rejectedAt: `${jalaliTodayString()} ${nowTime()}`,
+            rejectReason: reason,
+            reservationExpiresAt: null,
+            audit: [...(x.audit || []), auditEntry(user, `رد مدیر — رزرو آزاد شد — دلیل: ${reason}`)],
+          }
+        : x));
+      pushMessage(p.createdBy, `برنامه پخت ${p.date} توسط مدیر رد شد — رزرو مواد آزاد گردید. دلیل: ${reason}`, 'danger');
+      toast('برنامه رد شد و رزرو آزاد شد');
+    }
+    checked.value = { ...checked.value, [row.key]: {} };
+    viewing.value = null;
   }
-  checked.value = { ...checked.value, [row.key]: {} };
 };
 const approveCookPlan = (row) => applyCookPlan(row, 'approve');
 const rejectCookPlan = (row) => applyCookPlan(row, 'reject');
@@ -515,6 +555,21 @@ const requestConfirm = (type, row) => {
   const tickedCount = undecided.filter((_, i) => checked.value[row.key]?.[row.items.indexOf(undecided[i])]).length;
   const undecidedCount = undecided.length;
   const kindText = TYPE_META[row.type].label;
+  // برنامه پخت: ماشین دو مرحله‌ای — عنوان مخصوص هر مرحله
+  if (row.type === 'cookplan') {
+    const stage = row.raw.status;
+    const isReject = type === 'reject';
+    let msg;
+    if (stage === 'pending') {
+      msg = `تأیید سرآشپز: مواد غذاهای تیک‌خورده (${toFa(Math.max(tickedCount, undecidedCount))} قلم) رزرو می‌شود و برنامه برای تأیید نهایی مدیر ارسال می‌گردد.`;
+    } else if (stage === 'reserved') {
+      msg = isReject
+        ? `رد مدیر: رزرو مواد برنامه آزاد می‌شود و برنامه بسته خواهد شد.`
+        : `تأیید نهایی مدیر: مواد رزرو‌شده مصرف می‌شود و برنامه قطعی می‌گردد.`;
+    }
+    confirmAction.value = { type, row, message: msg, needReason: isReject && stage === 'reserved' };
+    return;
+  }
   let msg;
   if (tickedCount > 0 && tickedCount < undecidedCount) {
     msg = type === 'approve'
@@ -529,25 +584,36 @@ const requestConfirm = (type, row) => {
       ? `اقلامی تیک نخورده است. ابتدا اقلام موردنظر را انتخاب کنید.`
       : `اقلامی تیک نخورده است. ابتدا اقلام موردنظر را انتخاب کنید.`;
   }
-  confirmAction.value = { type, row, message: msg };
+  confirmAction.value = { type, row, message: msg, needReason: false };
 };
 
+// دلیل رد / یادداشت تصمیم
+const confirmReason = ref('');
+const confirmNote = ref('');
+const presetReasons = computed(() => (store.rejectionReasons || []));
+
 const executeConfirm = () => {
-  const { type, row } = confirmAction.value;
-  const hasTick = row.items.some((_, i) => checked.value[row.key]?.[i] && !(row.raw?.items?.[i]?.decision === 'approve' || row.raw?.items?.[i]?.decision === 'reject'));
+  const { type, row, needReason } = confirmAction.value;
+  const reason = confirmReason.value.trim();
+  const note = confirmNote.value.trim();
+  if (needReason && !reason) { confirmAction.value = null; return toast('انتخاب یا وارد کردن دلیل رد الزامی است', 'error'); }
   confirmAction.value = null;
+  confirmReason.value = '';
+  confirmNote.value = '';
+  if (row.type === 'cookplan') {
+    return applyCookPlan(row, type, reason, note);
+  }
+  const hasTick = row.items.some((_, i) => checked.value[row.key]?.[i] && !(row.raw?.items?.[i]?.decision === 'approve' || row.raw?.items?.[i]?.decision === 'reject'));
   if (!hasTick) return toast('ابتدا اقلام موردنظر را تیک بزنید', 'error');
   if (type === 'approve') {
     if (row.type === 'preinvoice') return approvePreInvoice(row);
     if (row.type === 'stockin') return deliverStockIn(row);
     if (row.type === 'stockout') return approveStockOut(row);
-    if (row.type === 'cookplan') return approveCookPlan(row);
     if (row.type === 'purchase') return approvePurchase(row);
   } else {
     if (row.type === 'preinvoice') return rejectPreInvoice(row);
     if (row.type === 'stockin') return rejectStockIn(row);
     if (row.type === 'stockout') return rejectStockOut(row);
-    if (row.type === 'cookplan') return rejectCookPlan(row);
     if (row.type === 'purchase') return rejectPurchase(row);
   }
 };
@@ -687,7 +753,10 @@ const viewingDecided = computed(() => (viewingRow.value ? viewingRow.value.items
         <div class="flex-1 min-w-0">
           <div class="flex items-center gap-2 flex-wrap">
             <span class="text-sm font-black text-slate-800">{{ row.title }}</span>
-            <span class="text-[9px] font-black px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">موقت</span>
+            <span v-if="row.type === 'cookplan'" class="text-[9px] font-black px-2 py-0.5 rounded-full" :class="row.stage === 'reserved' ? 'bg-sky-100 text-sky-700' : 'bg-amber-100 text-amber-700'">
+              {{ row.stage === 'reserved' ? 'در انتظار تأیید مدیر' : 'در انتظار تأیید سرآشپز' }}
+            </span>
+            <span v-else class="text-[9px] font-black px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">موقت</span>
           </div>
           <div class="text-[10px] text-slate-500 font-bold mt-0.5 flex items-center gap-2 flex-wrap">
             <span>{{ TYPE_META[row.type].label }}</span> · <span>{{ toFa(row.date) }}</span>
@@ -979,6 +1048,26 @@ const viewingDecided = computed(() => (viewingRow.value ? viewingRow.value.items
           {{ confirmAction.type === 'approve' ? 'تایید درخواست' : 'رد درخواست' }}
         </h3>
         <p class="text-xs font-bold text-slate-600 leading-6">{{ confirmAction.message }}</p>
+        <!-- دلیل رد / یادداشت تصمیم (فاز ۱) -->
+        <div v-if="confirmAction.type === 'reject' || confirmAction.row?.type === 'cookplan'" class="space-y-2">
+          <label class="block text-[11px] font-black text-slate-700">
+            {{ confirmAction.needReason ? 'دلیل رد (الزامی):' : 'دلیل / یادداشت (اختیاری):' }}
+          </label>
+          <select v-if="(presetReasons || []).length > 0" v-model="confirmReason" :class="`w-full border border-slate-200 rounded-xl px-3 py-2.5 text-xs font-bold focus:outline-none focus:ring-2 focus:ring-indigo-500`">
+            <option value="">— انتخاب دلیل آماده —</option>
+            <option v-for="r in presetReasons" :key="r.id" :value="r.text">{{ r.text }}</option>
+          </select>
+          <input
+            v-model="confirmReason"
+            placeholder="یا دلیل را آزاد بنویسید..."
+            class="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-xs font-bold focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          />
+          <input
+            v-model="confirmNote"
+            placeholder="یادداشت تصمیم (اختیاری)..."
+            class="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-xs font-bold focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          />
+        </div>
         <p class="text-[10px] text-slate-400 font-bold">پس از انجام، پیام اطلاع‌رسانی به درخواست‌کننده ارسال می‌شود.</p>
         <div class="flex gap-2 pt-1">
           <button
@@ -988,7 +1077,7 @@ const viewingDecided = computed(() => (viewingRow.value ? viewingRow.value.items
             بله، {{ confirmAction.type === 'approve' ? 'تایید می‌کنم' : 'رد می‌کنم' }}
           </button>
           <button
-            @click="confirmAction = null"
+            @click="confirmAction = null; confirmReason = ''; confirmNote = ''"
             class="flex-1 px-4 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition"
           >
             انصراف

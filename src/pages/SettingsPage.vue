@@ -7,7 +7,7 @@
 import { ref, computed } from 'vue';
 import {
   Sliders, Users, ChefHat, Layers, BookOpen, Ruler, Percent, UserCog, Trash2, Edit3, Plus,
-  Type, Lock, FolderTree, Settings as SettingsIcon, Package2, AlertTriangle, Receipt, Coins, Building2,
+  Type, Lock, FolderTree, Settings as SettingsIcon, Package2, AlertTriangle, Receipt, Coins, Building2, Clock3, Trash2 as TrashIcon, Edit3 as EditIcon,
 } from 'lucide-vue-next';
 import { toFa, formatMoney, uid } from '../lib/utils.js';
 import SearchableSelect from '../components/SearchableSelect.vue';
@@ -47,6 +47,8 @@ const GROUPS = [
     id: 'config', label: 'تنظیمات', icon: SettingsIcon,
     tabs: [
       { id: 'units', label: 'واحد اندازه‌گیری', icon: Ruler },
+      { id: 'rejection_reasons', label: 'دلایل رد', icon: AlertTriangle },
+      { id: 'reservation_timeout', label: 'مهلت رزرو', icon: Clock3 },
       { id: 'tax', label: 'نرخ مالیات', icon: Percent },
       { id: 'overheads', label: 'هزینه‌های سربار', icon: Receipt },
       { id: 'currency', label: 'واحد پول', icon: Coins },
@@ -69,6 +71,8 @@ const TAB_PERMS = {
   recipes: 'manage_recipes',
   supplies: 'manage_supplies',
   units: 'manage_settings',
+  rejection_reasons: 'manage_rejection_reasons',
+  reservation_timeout: 'manage_reservation_timeout',
   tax: 'manage_settings',
   overheads: 'manage_settings',
   currency: 'manage_settings',
@@ -425,6 +429,37 @@ const convChainText = (u) => {
     cur = x.baseUnit;
   }
   return parts.join(' ← ');
+};
+
+/* ============ تب دلایل رد (فاز ۱) ============ */
+const rrF = ref({ text: '', category: 'cookplan' });
+const rrEditId = ref(null);
+const rrSubmit = () => {
+  const t = (rrF.value.text || '').trim();
+  if (!t) return toast('متن دلیل را وارد کنید', 'error');
+  if (rrEditId.value) {
+    store.rejectionReasons = store.rejectionReasons.map((r) => (r.id === rrEditId.value ? { ...r, text: t, category: rrF.value.category } : r));
+    toast('دلیل رد ویرایش شد');
+  } else {
+    store.rejectionReasons = [...store.rejectionReasons, { id: uid('rr'), text: t, category: rrF.value.category }];
+    toast('دلیل رد جدید ثبت شد');
+  }
+  rrF.value = { text: '', category: 'cookplan' };
+  rrEditId.value = null;
+};
+const rrEdit = (r) => { rrEditId.value = r.id; rrF.value = { text: r.text, category: r.category }; };
+const rrCancel = () => { rrEditId.value = null; rrF.value = { text: '', category: 'cookplan' }; };
+const rrDelete = (r) => {
+  store.rejectionReasons = store.rejectionReasons.filter((x) => x.id !== r.id);
+  toast('دلیل رد حذف شد');
+};
+
+/* ============ تنظیم Timeout رزرو (فاز ۱) ============ */
+const timeoutH = computed(() => Number(store.settings.reservationTimeoutHours) || 24);
+const setTimeoutH = (v) => {
+  const n = Math.max(1, Math.min(720, Number(v) || 24));
+  store.settings = { ...store.settings, reservationTimeoutHours: n };
+  toast(`مهلت رزرو به ${toFa(n)} ساعت تنظیم شد`);
 };
 
 /* ============ تب نرخ مالیات ============ */
@@ -1242,6 +1277,80 @@ const editingRoleName = computed(() => (store.roles.find((r) => r.id === roleEdi
             </template>
           </tbody>
         </table>
+      </div>
+    </div>
+
+    <!-- ============ تب دلایل رد (فاز ۱) ============ -->
+    <div v-else-if="tab === 'rejection_reasons'" class="max-w-2xl space-y-4">
+      <form class="bg-white border border-slate-200 rounded-2xl p-5 space-y-4" @submit.prevent="rrSubmit">
+        <h3 class="font-black text-sm text-slate-800">{{ rrEditId ? 'ویرایش دلیل رد' : 'افزودن دلیل رد' }}</h3>
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div class="sm:col-span-2">
+            <label class="block text-xs font-bold text-slate-700 mb-1.5">متن دلیل:</label>
+            <input v-model="rrF.text" placeholder="مثلاً: موجودی انبار کافی نیست" :class="inputCls" />
+          </div>
+          <div>
+            <label class="block text-xs font-bold text-slate-700 mb-1.5">دسته (مورد استفاده):</label>
+            <select v-model="rrF.category" :class="`${inputCls} font-bold`">
+              <option value="cookplan">برنامه پخت</option>
+              <option value="purchase">درخواست خرید</option>
+              <option value="grn">رسید انبار</option>
+              <option value="invoice">فاکتور</option>
+              <option value="stockout">حواله خروج</option>
+            </select>
+          </div>
+        </div>
+        <div class="flex gap-2">
+          <button type="submit" class="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-black transition">
+            {{ rrEditId ? 'ذخیره ویرایش' : 'ثبت دلیل' }}
+          </button>
+          <button v-if="rrEditId" type="button" class="px-6 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition" @click="rrCancel">انصراف</button>
+        </div>
+      </form>
+
+      <div class="bg-white border border-slate-200 rounded-2xl overflow-hidden">
+        <table class="w-full text-right text-xs">
+          <thead class="bg-slate-50 font-black text-slate-700 border-b border-slate-200">
+            <tr>
+              <th class="p-3 w-14 text-center">ردیف</th>
+              <th class="p-3">متن دلیل</th>
+              <th class="p-3 text-center">دسته</th>
+              <th class="p-3 text-center w-24">عملیات</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100">
+            <EmptyRow v-if="store.rejectionReasons.length === 0" :col-span="4" text="دلیلی ثبت نشده" />
+            <tr v-for="(r, i) in store.rejectionReasons" v-else :key="r.id" class="hover:bg-slate-50">
+              <td class="p-3 text-center text-slate-500">{{ toFa(i + 1) }}</td>
+              <td class="p-3 font-black text-slate-800">{{ r.text }}</td>
+              <td class="p-3 text-center text-slate-600">{{ { cookplan: 'برنامه پخت', purchase: 'درخواست خرید', grn: 'رسید انبار', invoice: 'فاکتور', stockout: 'حواله' }[r.category] || r.category }}</td>
+              <td class="p-3 text-center">
+                <div class="flex items-center justify-center gap-1">
+                  <button title="ویرایش" class="p-1.5 text-slate-500 hover:text-sky-600 hover:bg-sky-50 rounded-lg transition" @click="rrEdit(r)"><Edit3 class="w-4 h-4" /></button>
+                  <button title="حذف" class="p-1.5 text-slate-500 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition" @click="rrDelete(r)"><Trash2 class="w-4 h-4" /></button>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ============ تب مهلت رزرو (فاز ۱) ============ -->
+    <div v-else-if="tab === 'reservation_timeout'" class="max-w-xl space-y-4">
+      <div class="bg-white border border-slate-200 rounded-2xl p-6 space-y-4">
+        <h3 class="font-black text-sm text-slate-800">مهلت رزرو مواد (Timeout)</h3>
+        <p class="text-[11px] text-slate-500 leading-relaxed">
+          پس از تأیید سرآشپز، مواد برنامه پخت به این مدت رزرو می‌شوند. اگر مدیر تا پایان مهلت تأیید نهایی نکند،
+          رزرو به‌صورت خودکار آزاد و برنامه به حالت «در انتظار تأیید سرآشپز» برمی‌گردد.
+        </p>
+        <div class="flex items-center gap-3 max-w-xs">
+          <FaNumberInput :model-value="String(timeoutH)" :class="`${inputCls} text-center font-black`" @update:model-value="setTimeoutH" />
+          <span class="text-xs font-bold text-slate-600">ساعت</span>
+        </div>
+        <div class="bg-sky-50 border border-sky-200 rounded-2xl p-3.5 text-[11px] font-bold text-sky-900">
+          مقدار فعلی: {{ toFa(timeoutH) }} ساعت — رزروهای فعال هر ۶۰ ثانیه کنترل می‌شوند.
+        </div>
       </div>
     </div>
 

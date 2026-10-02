@@ -45,6 +45,14 @@ const criticalCount = computed(() =>
   lowItems.value.filter((i) => (i.minThreshold ? i.qty / i.minThreshold : 1) <= 0.5).length
 );
 
+// ===== فاز ۱: موجودی قابل استفاده (qty - reserved) + رزروهای فعال =====
+const availableItems = computed(() => store.ingredients.map((i) => ({ ...i, available: Math.max(0, (i.qty || 0) - (i.reserved || 0)) })));
+const totalPhysical = computed(() => store.ingredients.reduce((s, i) => s + (i.qty || 0), 0));
+const totalReserved = computed(() => store.ingredients.reduce((s, i) => s + (i.reserved || 0), 0));
+const totalAvailable = computed(() => totalPhysical.value - totalReserved.value);
+const activeReservations = computed(() => (store.plans || []).filter((p) => p.status === 'reserved'));
+const pendingChefPlans = computed(() => (store.plans || []).filter((p) => p.status === 'pending'));
+
 /* ===== کاشی سمت چپ: برنامه پخت روزانه vs فروش ===== */
 const todayPlans = computed(() => store.plans.filter((p) => p.date === today));
 const finalPlans = computed(() => todayPlans.value.filter((p) => p.status === 'final'));
@@ -188,6 +196,40 @@ const cookRows = computed(() => {
 
       <!-- کاشی وسط: اقلام انبار در وضعیت کمبود (قرمز) -->
       <div class="bg-white rounded-3xl p-5 sm:p-6 shadow-sm flex flex-col gap-4 border" :class="lowItems.length ? 'border-rose-200' : 'border-slate-200'">
+        <!-- فاز ۱: خلاصه موجودی قابل استفاده + رزروهای فعال -->
+        <div class="grid grid-cols-3 gap-2">
+          <div class="rounded-2xl bg-slate-50 border border-slate-100 p-2.5 text-center">
+            <div class="text-[9px] font-bold text-slate-500">فیزیکی</div>
+            <div class="text-sm font-black text-slate-800 tabular-nums">{{ toFa(Math.round(totalPhysical * 10) / 10) }}</div>
+          </div>
+          <div class="rounded-2xl bg-sky-50 border border-sky-100 p-2.5 text-center">
+            <div class="text-[9px] font-bold text-sky-600">رزرو</div>
+            <div class="text-sm font-black text-sky-800 tabular-nums">{{ toFa(Math.round(totalReserved * 10) / 10) }}</div>
+          </div>
+          <div class="rounded-2xl bg-emerald-50 border border-emerald-100 p-2.5 text-center">
+            <div class="text-[9px] font-bold text-emerald-600">قابل استفاده</div>
+            <div class="text-sm font-black text-emerald-800 tabular-nums">{{ toFa(Math.round(totalAvailable * 10) / 10) }}</div>
+          </div>
+        </div>
+        <!-- هشدار رزروهای فعال / در انتظار سرآشپز -->
+        <div v-if="activeReservations.length > 0 || pendingChefPlans.length > 0" class="space-y-1.5">
+          <div
+            v-for="p in activeReservations"
+            :key="p.id"
+            class="rounded-2xl bg-sky-50 border border-sky-200 px-3 py-2 flex items-center justify-between text-[10px] font-bold text-sky-900"
+          >
+            <span>رزرو فعال — برنامه {{ faDatePretty(p.date) }}</span>
+            <span class="tabular-nums">{{ toFa(Math.max(0, Math.ceil((p.reservationExpiresAt - Date.now()) / 3600000))) }} ساعت مانده</span>
+          </div>
+          <div
+            v-for="p in pendingChefPlans"
+            :key="p.id"
+            class="rounded-2xl bg-amber-50 border border-amber-200 px-3 py-2 flex items-center justify-between text-[10px] font-bold text-amber-900"
+          >
+            <span>در انتظار تأیید سرآشپز — {{ faDatePretty(p.date) }}</span>
+          </div>
+        </div>
+
         <div class="flex items-center justify-between">
           <div class="flex items-center gap-2.5">
             <div class="p-2.5 rounded-2xl" :class="lowItems.length ? 'bg-rose-50 text-rose-600' : 'bg-emerald-50 text-emerald-600'">
