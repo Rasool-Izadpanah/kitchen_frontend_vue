@@ -198,7 +198,7 @@ export const PERMISSIONS = [
   { key: 'create_purchase_order', label: 'صدور سفارش خرید (PO)', group: 'خرید' },
   { key: 'receive_goods', label: 'ثبت رسید انبار (GRN)', group: 'انبار' },
   { key: 'quality_check', label: 'کنترل کیفیت رسید', group: 'انبار' },
-  { key: 'record_purchase_invoice', label: 'ثبت فاکتور خرید', group: 'خرید' },
+  { key: 'record_purchase_invoice', label: 'ورود قیمت خرید / ثبت فاکتور (حسابداری)', group: 'حسابداری' },
   { key: 'three_way_match', label: 'تطبیق سه‌طرفه', group: 'خرید' },
   { key: 'manage_suppliers', label: 'مدیریت تأمین‌کنندگان', group: 'تعاریف' },
   { key: 'dailycook', label: 'برنامه پخت روزانه', group: 'عملیات' },
@@ -250,6 +250,13 @@ export const INITIAL_ROLES = [
       view_dashboard: true, view_warehouse: true, view_reports: true,
       view_reservations: true,
       receive_goods: true, quality_check: true,
+    }
+  },
+  {
+    id: 'accountant', name: 'حسابدار', system: false, permissions: {
+      ...allPerms(false),
+      view_dashboard: true, record_purchase_invoice: true,
+      view_reports: true, print_reports: true,
     }
   },
 ];

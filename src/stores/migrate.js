@@ -64,6 +64,16 @@ export function migrateData(data) {
       }));
     }
   });
+  // فاز ۳.۵+ — چرخه قیمت‌گذاری: PR های completed قدیمی بدون قیمت → delivered
+  if (Array.isArray(data.purchaseRequests)) {
+    data.purchaseRequests = data.purchaseRequests.map((r) => {
+      if (r.status === 'completed' && !r.pricedAt) {
+        const anyPriced = Array.isArray(r.items) && r.items.some((it) => (Number(it.unitPrice) || 0) > 0);
+        if (!anyPriced) return { ...r, status: 'delivered', needsPricing: true };
+      }
+      return r;
+    });
+  }
   // settings: timeout رزرو + کلیدهای فاز ۲
   if (data.settings && typeof data.settings === 'object') {
     if (data.settings.reservationTimeoutHours === undefined) data.settings.reservationTimeoutHours = 24;

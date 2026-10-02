@@ -6,7 +6,7 @@
 import { ref, computed } from 'vue';
 import {
   Inbox, FileText, ShoppingCart, PackagePlus, PackageMinus, UtensilsCrossed,
-  Check, X, Eye, CheckCheck, Bell, MessageSquare, AlertTriangle, Trash2, Pencil, Printer,
+  Check, X, Eye, CheckCheck, Bell, MessageSquare, AlertTriangle, Trash2, Pencil, Printer, Calculator,
 } from 'lucide-vue-next';
 import { toFa, formatMoney, jalaliTodayString, nowTime, uid, auditEntry, userDisplay } from '../lib/utils.js';
 import { applyInventoryOp, calcNeedsWithWaste, shortageOnAvailable } from '../lib/inventory.js';
@@ -26,6 +26,7 @@ const TABS = [
   { id: 'preinvoice', label: 'پیش‌فاکتور', icon: FileText },
   { id: 'purchase', label: 'درخواست خرید کالا', icon: ShoppingCart },
   { id: 'purchasing', label: 'تحویل خرید به انبار', icon: PackagePlus },
+  { id: 'pricing', label: 'ورود قیمت خرید', icon: Calculator },
   { id: 'stockout', label: 'درخواست کالا از انبار', icon: PackageMinus },
 ];
 
@@ -34,6 +35,7 @@ const TYPE_META = {
   preinvoice: { label: 'پیش‌فاکتور', icon: FileText, color: 'sky' },
   purchase: { label: 'درخواست خرید کالا', icon: ShoppingCart, color: 'amber' },
   purchasing: { label: 'تحویل خرید به انبار', icon: PackagePlus, color: 'emerald' },
+  pricing: { label: 'ورود قیمت خرید', icon: Calculator, color: 'indigo' },
   stockout: { label: 'درخواست کالا ازانبار', icon: PackageMinus, color: 'rose' },
 };
 
@@ -43,6 +45,7 @@ const COLORS = {
   amber: 'bg-amber-50 text-amber-700 border-amber-200',
   rose: 'bg-rose-50 text-rose-700 border-rose-200',
   emerald: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+  indigo: 'bg-indigo-50 text-indigo-700 border-indigo-200',
 };
 
 const tab = ref('cookplan');
@@ -149,6 +152,7 @@ const confirmDelivery = (row) => {
   let anyAdded = false;
   const overReceipts = [];
   let notDelivered = 0;
+  const moveIdSeq = {}; // idx → moveId (برای اتصال قلم PR به move)
   const updatedItems = r.items.map((it, i) => {
     const e = entries[i];
     if (e.decision !== 'delivered') {
@@ -158,6 +162,7 @@ const confirmDelivery = (row) => {
     const raw = String(e.qty ?? '').trim();
     const recvQty = raw === '' ? it.qty : Number(raw);
     if (recvQty > 0) {
+      // فاز ۳.۵+: فقط مقدار اضافه می‌شود — قیمت و avgPrice در مرحله «ورود قیمت حسابدار» ثبت می‌شود
       store.ingredients = store.ingredients.map((ing) => (it.ingredientId === ing.id ? { ...ing, qty: Number((ing.qty + recvQty).toFixed(3)) } : ing));
       if (it.supplyId) store.supplies = (store.supplies || []).map((s) => (s.id === it.supplyId ? { ...s, qty: (s.qty || 0) + recvQty } : s));
       anyAdded = true;
@@ -166,36 +171,55 @@ const confirmDelivery = (row) => {
     return { ...it, receivedQty: recvQty, deliveryNote: (e.note || '').trim(), deliveredAt: `${jalaliTodayString()} ${toFa(nowTime())}`, deliveredBy: props.userName };
   });
   const deliveredCount = r.items.length - notDelivered;
-  const newMoves = updatedItems.filter((it) => Number(it.receivedQty) > 0).map((it) => ({
-    id: `m${Date.now()}_${Math.floor(Math.random() * 1000)}_${it.ingredientId || it.supplyId}`,
-    date: jalaliTodayString(), time: toFa(nowTime()),
-    ingredientId: it.ingredientId || '', supplyId: it.supplyId || '',
-    name: it.name, type: 'in',
-    qty: Number(it.receivedQty), unit: it.unit,
-    desc: `تحویل خرید — درخواست ${r.id}${it.deliveryNote ? ` (${it.deliveryNote})` : ''}`, person: props.userName || 'انباردار',
-    sender: 'خرید', receiver: props.userName || 'انباردار',
-    batchId: `B${Date.now().toString(36)}`,
-  }));
+  const deliveredStamp = `${jalaliTodayString()} ${toFa(nowTime())}`;
+  const newMoves = updatedItems.filter((it) => Number(it.receivedQty) > 0).map((it, k) => {
+    const mid = `m${Date.now()}_${Math.floor(Math.random() * 1000)}_${it.ingredientId || it.supplyId}`;
+    // نگاشت idx قلم PR → moveId (قلم‌های تحویلی به ترتیب فیلتر)
+    const idx = updatedItems.findIndex((x) => x === it);
+    moveIdSeq[idx] = mid;
+    return {
+      id: mid,
+      date: jalaliTodayString(), time: toFa(nowTime()),
+      ingredientId: it.ingredientId || '', supplyId: it.supplyId || '',
+      name: it.name, type: 'in',
+      qty: Number(it.receivedQty), unit: it.unit,
+      unitPrice: 0, totalPrice: 0, price: 0, // قیمت بعداً توسط حسابدار وارد می‌شود
+      refType: 'purchase', refId: r.id,
+      desc: `تحویل خرید — درخواست ${r.id}${it.deliveryNote ? ` (${it.deliveryNote})` : ''}`, person: props.userName || 'انباردار',
+      sender: 'خرید', receiver: props.userName || 'انباردار',
+      batchId: `B${Date.now().toString(36)}`,
+    };
+  });
   if (newMoves.length) store.moves = [...newMoves, ...(store.moves || [])];
-  // همه اقلام تعیین تکلیف شدند → درخواست بسته می‌شود
+  // اتصال moveId به اقلام PR
+  updatedItems.forEach((it, idx) => { if (moveIdSeq[idx]) it.moveId = moveIdSeq[idx]; });
+  // همه اقلام تعیین تکلیف شدند → delivered (در انتظار ورود قیمت حسابدار) یا cancelled
   const allNotDelivered = notDelivered === r.items.length;
   store.purchaseRequests = store.purchaseRequests.map((x) => (x.id === r.id ? {
     ...x,
     items: updatedItems,
-    status: allNotDelivered ? 'cancelled' : 'completed',
-    completedAt: `${jalaliTodayString()} ${toFa(nowTime())}`,
-    completedBy: props.userName,
-    audit: [...(x.audit || []), auditEntry(store.currentUser, `تحویل خرید — ${deliveredCount} قلم تحویل شد، ${notDelivered} قلم تحویل نشد`)],
+    status: allNotDelivered ? 'cancelled' : 'delivered',
+    deliveredAt: deliveredStamp,
+    deliveredBy: props.userName,
+    audit: [...(x.audit || []), auditEntry(store.currentUser, `تحویل خرید — ${deliveredCount} قلم تحویل شد، ${notDelivered} قلم تحویل نشد — در انتظار ورود قیمت حسابداری`)],
   } : x));
   delivery.value = { ...delivery.value, [row.key]: {} };
+  if (!allNotDelivered) {
+    // اطلاع به حسابداران برای ورود قیمت
+    (store.users || []).forEach((u) => {
+      const isAccountant = u.roles?.includes('accountant') || u.role === 'accountant';
+      if (!isAccountant) return;
+      pushMessage(userDisplay(u), `درخواست خرید ${r.id} تحویل شد — در انتظار ورود قیمت.`, 'info');
+    });
+  }
   pushMessage(r.requester, allNotDelivered
     ? `درخواست خرید ${r.id} به دلیل عدم تهیه ابطال شد.`
-    : `درخواست خرید ${r.id} بسته شد: ${toFa(deliveredCount)} قلم تحویل و به انبار اضافه شد${notDelivered > 0 ? `، ${toFa(notDelivered)} قلم تحویل نشد` : ''}.`, allNotDelivered ? 'danger' : 'success');
+    : `درخواست خرید ${r.id}: ${toFa(deliveredCount)} قلم تحویل و به انبار اضافه شد${notDelivered > 0 ? `، ${toFa(notDelivered)} قلم تحویل نشد` : ''} — در انتظار ورود قیمت.`, allNotDelivered ? 'danger' : 'success');
   viewing.value = null;
   toast(allNotDelivered
     ? 'درخواست به دلیل عدم تحویل بسته شد'
     : (anyAdded
-      ? (overReceipts.length > 0 ? `به انبار اضافه شد — توجه: ${overReceipts.join('، ')}` : 'اقلام تحویل‌شده به انبار اضافه شد و درخواست بسته شد')
+      ? (overReceipts.length > 0 ? `به انبار اضافه شد — توجه: ${overReceipts.join('، ')} — در انتظار ورود قیمت توسط حسابداری` : 'اقلام به انبار اضافه شد — در انتظار ورود قیمت توسط حسابداری')
       : 'درخواست بسته شد'));
 };
 
@@ -225,11 +249,123 @@ const purchaseRows = computed(() => (store.purchaseRequests || []).filter((r) =>
 
 // سفارش‌های تاییدشده در انتظار تحویل (مسئول خرید/انباردار)
 const purchasingRows = computed(() => (store.purchaseRequests || []).filter((r) => r.status === 'ordered').map((r) => ({
-  key: `po-${r.id}`, type: 'purchasing', id: r.id, title: `تحویل خرید — ${r.requester}`,
-  date: r.date, time: r.time, by: r.approvedByUser || '—',
+  key: `po-${r.id}`, type: 'purchasing', id: r.id, title: `تحویل خرید — ${r.requester}`, date: r.date, time: r.time, by: r.approvedByUser || '—',
   items: r.items.map((it) => ({ name: it.name, qty: it.qty, unit: it.unit, decision: it.decision, receivedQty: it.receivedQty, deliveryNote: it.deliveryNote, ingredientId: it.ingredientId, supplyId: it.supplyId })),
   raw: r,
 })));
+
+// ===== فاز ۳.۵+ — درخواست‌های تحویل‌شده در انتظار ورود قیمت (حسابداری) =====
+const pricingRows = computed(() => (store.purchaseRequests || [])
+  .filter((r) => r.status === 'delivered' || r.needsPricing)
+  .map((r) => ({
+    key: `pc-${r.id}`,
+    type: 'pricing',
+    id: r.id,
+    title: `ورود قیمت — ${r.requester}`,
+    date: (r.deliveredAt || r.date || '').split(' ')[0] || r.date,
+    time: (r.deliveredAt || '').split(' ')[1] || '',
+    by: r.deliveredBy || '—',
+    items: r.items.map((it) => ({
+      name: it.name,
+      qty: it.qty,
+      receivedQty: it.receivedQty,
+      unit: it.unit,
+      price: it.unitPrice || it.price || 0,
+    })),
+    raw: r,
+  })));
+
+// ===== ورود قیمت توسط حسابدار =====
+const pricingForm = ref(null); // { row, prices: {idx: string} }
+const openPricing = (row) => {
+  if (!store.can('record_purchase_invoice')) return toast('شما مجوز ورود قیمت خرید را ندارید', 'error');
+  pricingForm.value = {
+    row,
+    prices: Object.fromEntries(row.raw.items.map((it, i) => [i, it.unitPrice ? String(it.unitPrice) : ''])),
+  };
+};
+const pricingTotal = computed(() => {
+  if (!pricingForm.value) return 0;
+  const r = pricingForm.value.row.raw;
+  return r.items.reduce((s, it, i) => s + (Number(it.receivedQty) || 0) * (Number(pricingForm.value.prices[i]) || 0), 0);
+});
+
+const applyPurchasePricing = () => {
+  const { row, prices } = pricingForm.value;
+  const r = row.raw;
+  if (!store.can('record_purchase_invoice')) return toast('مجوز ورود قیمت خرید را ندارید', 'error');
+
+  // اعتبارسنجی: همه اقلام تحویل‌شده باید قیمت داشته باشند
+  const missing = r.items.filter((it, i) => (Number(it.receivedQty) || 0) > 0 && !Number(prices[i]));
+  if (missing.length > 0) return toast(`${toFa(missing.length)} قلم بدون قیمت — ورود قیمت برای همه اقلام تحویل‌شده الزامی است`, 'error');
+
+  // ۱. به‌روزرسانی مواد: میانگین موزون + قیمت جایگزینی + تاریخچه
+  store.ingredients = store.ingredients.map((ing) => {
+    const idx = r.items.findIndex((it) => it.ingredientId === ing.id && (Number(it.receivedQty) || 0) > 0);
+    if (idx === -1) return ing;
+    const item = r.items[idx];
+    const price = Number(prices[idx]);
+    const qtyIn = Number(item.receivedQty);
+    const qtyOld = (Number(ing.qty) || 0) - qtyIn; // موجودی قبل از این تحویل
+    const avgOld = Number(ing.avgPrice) || 0;
+    const qtyNew = Number(ing.qty) || 0;
+    const avgNew = qtyNew > 0 ? (qtyOld * avgOld + qtyIn * price) / qtyNew : price;
+    const history = Array.isArray(ing.priceHistory) ? [...ing.priceHistory] : [];
+    history.push({
+      date: (r.deliveredAt || jalaliTodayString()).split(' ')[0] || jalaliTodayString(),
+      price: Math.round(price),
+      supplierId: r.supplierId || '',
+      moveId: item.moveId || '',
+      qty: qtyIn,
+    });
+    return {
+      ...ing,
+      avgPrice: Math.round(avgNew),
+      price: Math.round(price),
+      priceHistory: history,
+    };
+  });
+
+  // ۲. به‌روزرسانی moves مربوطه (قیمت در لحظه تراکنش)
+  store.moves = store.moves.map((m) => {
+    const item = r.items.find((it) => it.moveId === m.id);
+    if (!item) return m;
+    const idx = r.items.indexOf(item);
+    const price = Number(prices[idx]);
+    const total = Math.round((Number(item.receivedQty) || 0) * price);
+    return { ...m, unitPrice: price, totalPrice: total, price, total };
+  });
+
+  // ۳. به‌روزرسانی purchaseRequest → completed
+  const updatedItems = r.items.map((it, i) => ({
+    ...it,
+    unitPrice: Number(prices[i]) || 0,
+    totalPrice: Math.round((Number(it.receivedQty) || 0) * (Number(prices[i]) || 0)),
+    pricedAt: `${jalaliTodayString()} ${toFa(nowTime())}`,
+    pricedBy: props.userName,
+  }));
+  const totalInvoice = updatedItems.reduce((s, it) => s + (it.totalPrice || 0), 0);
+
+  store.purchaseRequests = store.purchaseRequests.map((x) => (x.id === r.id
+    ? {
+        ...x,
+        items: updatedItems,
+        status: 'completed',
+        needsPricing: false,
+        pricedAt: `${jalaliTodayString()} ${toFa(nowTime())}`,
+        pricedBy: props.userName,
+        totalInvoice,
+        audit: [...(x.audit || []), auditEntry(store.currentUser, `ورود قیمت خرید توسط حسابدار — جمع فاکتور: ${toFa(totalInvoice)}`)],
+      }
+    : x));
+
+  // ۴. پیام‌ها
+  pushMessage(r.requester, `قیمت درخواست خرید ${r.id} توسط حسابداری ثبت شد (جمع: ${toFa(totalInvoice)}).`, 'success');
+  if (r.deliveredBy) pushMessage(r.deliveredBy, `قیمت درخواست خرید ${r.id} ثبت شد.`, 'success');
+  pricingForm.value = null;
+  viewing.value = null;
+  toast(`قیمت ${toFa(r.items.length)} قلم ثبت و بهای تمام‌شده به‌روز شد`);
+};
 
 const stockoutRows = computed(() => (store.stockRequests || []).filter((r) => r.status === 'temp' && r.kind === 'stockout').map((r) => ({
   key: `so-${r.id}`, type: 'stockout', id: r.id, title: `حواله انبار (خروج کالا) — ${r.requester}`,
@@ -245,7 +381,7 @@ const stockinReqRows = computed(() => (store.stockRequests || []).filter((r) => 
   raw: r,
 })));
 
-const allRows = computed(() => [...cookplanRows.value, ...preinvoiceRows.value, ...purchaseRows.value, ...purchasingRows.value, ...stockoutRows.value, ...stockinReqRows.value]);
+const allRows = computed(() => [...cookplanRows.value, ...preinvoiceRows.value, ...purchaseRows.value, ...purchasingRows.value, ...pricingRows.value, ...stockoutRows.value, ...stockinReqRows.value]);
 const rows = computed(() => (tab.value === 'all' ? allRows.value : allRows.value.filter((r) => r.type === tab.value)));
 
 // نشانگر: تعداد درخواست‌های باز به تفکیک نوع
@@ -352,7 +488,22 @@ const applyCookPlan = (row, decision, reason = '', decisionNote = '') => {
       if (!reason) return toast('ثبت دلیل رد الزامی است', 'error');
     }
 
-    const approvedItems = p.items.filter((it) => it.decision === 'approve');
+    // فاز ۳.۵+: هشدار اگر ماده مصرفی به PR تحویل‌شده بدون قیمت وصل است
+    if (decision === 'approve') {
+      const unpriced = new Set();
+      (store.purchaseRequests || []).filter((pr) => pr.status === 'delivered' || pr.needsPricing).forEach((pr) => {
+        pr.items.forEach((it) => {
+          if ((Number(it.receivedQty) || 0) > 0 && it.ingredientId) unpriced.add(it.ingredientId);
+        });
+      });
+      const affected = new Set();
+      approvedItems.forEach((it) => {
+        const rec = (store.recipes || []).find((r) => r.dishId === it.dishId);
+        rec?.items.forEach((ri) => { if (unpriced.has(ri.ingredientId)) affected.add(ri.ingredientId); });
+      });
+      if (affected.size > 0 && !window.confirm(`${toFa(affected.size)} ماده مصرفی شما هنوز قیمت خریدشان توسط حسابداری ثبت نشده است. بهای تاریخی با قیمت میانگین قبلی محاسبه می‌شود. ادامه می‌دهید؟`)) return;
+    }
+
     const approvedDishes = approvedItems.map((it) => ({ dishId: it.dishId, qty: it.approvedQty || it.qty }));
 
     if (decision === 'approve') {
@@ -793,10 +944,18 @@ const viewingDecided = computed(() => (viewingRow.value ? viewingRow.value.items
           </div>
         </div>
         <button
+          v-if="row.type !== 'pricing'"
           @click="viewing = row.key"
           class="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-[11px] font-black flex items-center gap-1.5 transition shrink-0"
         >
           <Eye class="w-4 h-4" /> نمایش
+        </button>
+        <button
+          v-else
+          @click="openPricing(row)"
+          class="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-[11px] font-black flex items-center gap-1.5 transition shrink-0"
+        >
+          <Calculator class="w-4 h-4" /> ورود قیمت
         </button>
       </div>
     </div>
@@ -1063,6 +1222,76 @@ const viewingDecided = computed(() => (viewingRow.value ? viewingRow.value.items
             <span>امضای مسئول خرید: ........................</span>
             <span>امضای انباردار: ........................</span>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== مودال ورود قیمت خرید (فاز ۳.۵+ حسابداری) ===== -->
+    <div v-if="pricingForm" class="fixed inset-0 z-[97] bg-black/60 backdrop-blur-sm flex items-start sm:items-center justify-center p-3 overflow-y-auto">
+      <div class="bg-white rounded-3xl shadow-2xl w-full max-w-3xl my-auto">
+        <div class="p-4 border-b flex items-center justify-between">
+          <div>
+            <h3 class="text-sm font-black text-slate-900">ورود قیمت خرید — {{ pricingForm.row.id }}</h3>
+            <p class="text-[10px] text-slate-500 font-bold mt-0.5">قیمت برای اقلام تحویل‌شده الزامی است — اقلام تحویل‌نشده غیرفعال‌اند</p>
+          </div>
+          <button class="p-2 text-slate-400 hover:bg-slate-100 rounded-xl" @click="pricingForm = null"><X class="w-5 h-5" /></button>
+        </div>
+        <div class="p-4 space-y-3">
+          <table class="w-full text-right text-xs">
+            <thead class="bg-slate-50 font-black text-slate-700 border-b border-slate-200">
+              <tr>
+                <th class="p-2.5 w-10 text-center">#</th>
+                <th class="p-2.5">کالا</th>
+                <th class="p-2.5 text-center">مقدار درخواست</th>
+                <th class="p-2.5 text-center">مقدار تحویل</th>
+                <th class="p-2.5 text-center w-32">قیمت واحد</th>
+                <th class="p-2.5 text-left">جمع</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-100">
+              <tr
+                v-for="(it, i) in pricingForm.row.raw.items"
+                :key="i"
+                :class="(Number(it.receivedQty) || 0) > 0 ? 'hover:bg-slate-50' : 'bg-slate-50/60 text-slate-400'"
+              >
+                <td class="p-2.5 text-center text-slate-400">{{ toFa(i + 1) }}</td>
+                <td class="p-2.5 font-bold">
+                  {{ it.name }}
+                  <span v-if="(Number(it.receivedQty) || 0) === 0" class="mr-1.5 text-[9px] font-black bg-slate-200 text-slate-500 px-2 py-0.5 rounded-full">تحویل نشد</span>
+                </td>
+                <td class="p-2.5 text-center">{{ toFa(it.qty) }} {{ it.unit }}</td>
+                <td class="p-2.5 text-center font-black" :class="(Number(it.receivedQty) || 0) > 0 ? 'text-emerald-700' : ''">
+                  {{ toFa(it.receivedQty || 0) }} {{ it.unit }}
+                </td>
+                <td class="p-2.5 text-center">
+                  <input
+                    dir="ltr"
+                    inputmode="decimal"
+                    :disabled="(Number(it.receivedQty) || 0) === 0"
+                    v-model="pricingForm.prices[i]"
+                    placeholder="قیمت واحد..."
+                    class="w-28 border border-indigo-300 rounded-lg px-2 py-1.5 text-center font-black text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:bg-slate-100 disabled:text-slate-300"
+                  />
+                </td>
+                <td class="p-2.5 text-left font-black tabular-nums" :class="(Number(it.receivedQty) || 0) > 0 && Number(pricingForm.prices[i]) ? 'text-indigo-700' : 'text-slate-300'">
+                  {{ (Number(it.receivedQty) || 0) > 0 && Number(pricingForm.prices[i]) ? formatMoney((Number(it.receivedQty) || 0) * (Number(pricingForm.prices[i]) || 0)) : '—' }}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="bg-indigo-50 border border-indigo-200 rounded-2xl p-3.5 flex items-center justify-between">
+            <span class="text-xs font-black text-indigo-900">جمع کل فاکتور خرید:</span>
+            <span class="text-lg font-black text-indigo-800 tabular-nums">{{ formatMoney(pricingTotal) }} {{ store.currency }}</span>
+          </div>
+          <p class="text-[10px] text-slate-500 font-bold leading-relaxed">
+            با ثبت، میانگین موزون (بهای تاریخی)، آخرین قیمت خرید (بهای جایگزینی) و تاریخچه قیمت مواد به‌روزرسانی می‌شود و درخواست به وضعیت «تکمیل‌شده» می‌رود.
+          </p>
+        </div>
+        <div class="p-4 border-t flex gap-2">
+          <button class="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-black flex items-center justify-center gap-1.5" @click="applyPurchasePricing">
+            <CheckCheck class="w-4 h-4" /> ثبت قیمت و اتمام
+          </button>
+          <button class="flex-1 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold" @click="pricingForm = null">انصراف</button>
         </div>
       </div>
     </div>
