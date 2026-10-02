@@ -53,7 +53,10 @@ export const useAppStore = defineStore('app', {
   }),
 
   getters: {
-    // printState: settings از استور تنظیمات خوانده می‌شود (در setup متصل می‌شود)
+    // ===== سازگاری: getterهای دامنه از localStorage (استور تنظیمات منبع حقیقت) =====
+    taxRate() { return Number(safeStorage.get('kitchen_settings', {}).taxRate) || 0; },
+    currency() { return safeStorage.get('kitchen_settings', {}).currency || 'تومان'; },
+    // printState: settings از استور تنظیمات خوانده می‌شود
     printState(state) {
       const cfg = safeStorage.get('kitchen_settings', {});
       return {
