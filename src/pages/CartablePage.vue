@@ -10,6 +10,7 @@ import {
 } from 'lucide-vue-next';
 import { toFa, formatMoney, jalaliTodayString, nowTime, uid, auditEntry, userDisplay } from '../lib/utils.js';
 import { applyInventoryOp, calcNeedsWithWaste, shortageOnAvailable } from '../lib/inventory.js';
+import { calcPlanCost } from '../lib/costing.js';
 import { useAppStore } from '../stores/app.js';
 
 const props = defineProps({
@@ -358,6 +359,8 @@ const applyCookPlan = (row, decision, reason = '', decisionNote = '') => {
       // consume: از رزرو به مصرف
       const needs = calcNeedsForItems(approvedDishes);
       applyInventoryOp(store, needs, 'consume', { user, plan: p, note: `مصرف از رزرو — تأیید نهایی مدیر برنامه ${p.date}${reason ? ` (${reason})` : ''}` });
+      // فاز ۳.۵ — محاسبه بهای تمام‌شده سه‌لایه در همان تراکنش
+      const cost = calcPlanCost(store, p);
       store.plans = store.plans.map((x) => (x.id === p.id
         ? {
             ...x,
@@ -366,11 +369,12 @@ const applyCookPlan = (row, decision, reason = '', decisionNote = '') => {
             approvedAt: `${jalaliTodayString()} ${nowTime()}`,
             reservationExpiresAt: null,
             stockDeducted: true,
-            audit: [...(x.audit || []), auditEntry(user, `تأیید نهایی مدیر — ${approvedItems.length} غذا مصرف شد${reason ? ` — دلیل: ${reason}` : ''}`)],
+            ...cost,
+            audit: [...(x.audit || []), auditEntry(user, `تأیید نهایی مدیر — ${approvedItems.length} غذا مصرف شد${reason ? ` — دلیل: ${reason}` : ''} — بهای تاریخی ${toFa(cost.costHistorical)} / جایگزینی ${toFa(cost.costReplacement)} / استاندارد ${toFa(cost.costStandard)}`)],
           }
         : x));
-      pushMessage(p.createdBy, `برنامه پخت ${p.date} به تأیید نهایی مدیر رسید و مواد رزرو‌شده مصرف شد.`, 'success');
-      toast('تأیید نهایی انجام شد — مواد از رزرو مصرف شد');
+      pushMessage(p.createdBy, `برنامه پخت ${p.date} به تأیید نهایی مدیر رسید و مواد رزرو‌شده مصرف شد. بهای هر پرس (جایگزینی): ${toFa(cost.costPerPortionReplacement)}.`, 'success');
+      toast('تأیید نهایی انجام شد — مواد مصرف و بهای تمام‌شده سه‌لایه ثبت شد');
     } else {
       // release: آزادسازی رزرو
       const needs = calcNeedsForItems(approvedDishes);
@@ -451,11 +455,25 @@ const applyStockIn = (row, decision) => {
     store.ingredients = store.ingredients.map((ing) => {
       const dd = targets.find((x) => x.ingredientId === ing.id);
       if (!dd) return ing;
-      if (dd.price > 0) {
-        const oldCost = ing.qty * (ing.price || 0);
-        const newCost = dd.qty * dd.price;
-        const avgPrice = (ing.qty + dd.qty) > 0 ? Math.round((oldCost + newCost) / (ing.qty + dd.qty)) : dd.price;
-        return { ...ing, qty: Number((ing.qty + dd.qty).toFixed(3)), price: avgPrice };
+      // فاز ۳.۵ — میانگین موزون متحرک + ثبت تاریخچه قیمت
+      if ((dd.price || 0) > 0) {
+        const qtyOld = Number(ing.qty) || 0;
+        const avgOld = Number(ing.avgPrice) || 0;
+        const qtyNew = qtyOld + dd.qty;
+        const avgNew = qtyNew > 0 ? (qtyOld * avgOld + dd.qty * dd.price) / qtyNew : dd.price;
+        const history = Array.isArray(ing.priceHistory) ? [...ing.priceHistory] : [];
+        history.push({ date: r.date || jalaliTodayString(), price: Math.round(dd.price), supplierId: r.supplierId || '', moveId: '', qty: dd.qty });
+        return {
+          ...ing,
+          qty: Number((ing.qty + dd.qty).toFixed(3)),
+          avgPrice: Math.round(avgNew),
+          price: Math.round(dd.price),
+          priceHistory: history,
+        };
+      }
+      // قیمت خالی → استفاده از قیمت قبلی + هشدار (قاعده ۳.۵.۷)
+      if (!dd.price || dd.price <= 0) {
+        setTimeout(() => props.showToast(`قیمت «${dd.name}» در رسید خالی بود — قیمت قبلی حفظ شد`, 'info'), 100);
       }
       return { ...ing, qty: Number((ing.qty + dd.qty).toFixed(3)) };
     });
@@ -465,6 +483,8 @@ const applyStockIn = (row, decision) => {
       ingredientId: it.ingredientId || '', supplyId: it.supplyId || '',
       name: it.name, type: 'in', kind: it.kind,
       qty: it.qty, unit: it.unit, price: it.price || 0,
+      unitPrice: it.price || 0,
+      totalPrice: (it.qty || 0) * (it.price || 0),
       total: it.qty * (it.price || 0),
       desc: r.desc || `رسید انبار ${r.id}`, person: props.userName || 'انباردار',
       sender: r.supplierName || '—', receiver: props.userName || 'انباردار',

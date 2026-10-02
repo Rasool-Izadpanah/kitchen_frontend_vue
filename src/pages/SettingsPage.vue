@@ -6,10 +6,10 @@
  */
 import { ref, computed } from 'vue';
 import {
-  Sliders, Users, ChefHat, Layers, BookOpen, Ruler, Percent, UserCog, Trash2, Edit3, Plus,
+  Sliders, Users, ChefHat, Layers, BookOpen, Ruler, Percent, UserCog, Trash2, Edit3, Plus, Calculator, X,
   Type, Lock, FolderTree, Settings as SettingsIcon, Package2, AlertTriangle, Receipt, Coins, Building2, Clock3, Trash2 as TrashIcon, Edit3 as EditIcon,
 } from 'lucide-vue-next';
-import { toFa, formatMoney, uid } from '../lib/utils.js';
+import { toFa, formatMoney, uid, jalaliTodayString } from '../lib/utils.js';
 import SearchableSelect from '../components/SearchableSelect.vue';
 import FaNumberInput from '../components/ui/FaNumberInput.vue';
 import MoneyInput from '../components/ui/MoneyInput.vue';
@@ -50,6 +50,7 @@ const GROUPS = [
       { id: 'rejection_reasons', label: 'دلایل رد', icon: AlertTriangle },
       { id: 'reservation_timeout', label: 'مهلت رزرو', icon: Clock3 },
       { id: 'purchase_modules', label: 'ماژول خرید', icon: Package2 },
+      { id: 'std_pricing', label: 'قیمت استاندارد', icon: Calculator },
       { id: 'tax', label: 'نرخ مالیات', icon: Percent },
       { id: 'overheads', label: 'هزینه‌های سربار', icon: Receipt },
       { id: 'currency', label: 'واحد پول', icon: Coins },
@@ -74,6 +75,7 @@ const TAB_PERMS = {
   units: 'manage_settings',
   rejection_reasons: 'manage_rejection_reasons',
   reservation_timeout: 'manage_reservation_timeout',
+  std_pricing: 'manage_settings',
   tax: 'manage_settings',
   overheads: 'manage_settings',
   currency: 'manage_settings',
@@ -431,6 +433,53 @@ const convChainText = (u) => {
   }
   return parts.join(' ← ');
 };
+
+/* ============ فاز ۳.۵ — بهای تمام‌شده سه‌لایه ============ */
+// بازنگری قیمت استاندارد: همه مواد + ورود قیمت جدید
+const spF = ref(null); // { rows: [{id, name, unit, standardPrice}] }
+const openStdReview = () => {
+  spF.value = {
+    rows: store.ingredients.map((i) => ({
+      id: i.id, name: i.name, unit: i.unit,
+      current: Number(i.standardPrice) || Number(i.avgPrice) || 0,
+      standardPrice: String(Number(i.standardPrice) || Number(i.avgPrice) || 0),
+    })),
+  };
+};
+const saveStdReview = () => {
+  const today = jalaliTodayString();
+  store.ingredients = store.ingredients.map((ing) => {
+    const row = spF.value.rows.find((r) => r.id === ing.id);
+    if (!row) return ing;
+    const np = Number(row.standardPrice) || 0;
+    if (np <= 0 || np === (Number(ing.standardPrice) || 0)) return ing;
+    return { ...ing, standardPrice: np, standardPriceUpdatedAt: today };
+  });
+  store.settings = { ...store.settings, standardPriceUpdatedAt: today };
+  spF.value = null;
+  toast(`بازنگری قیمت استاندارد در ${toFa(today)} ذخیره شد`);
+};
+// روز بازنگری و درصد سود
+const setReviewDay = (v) => {
+  const n = Math.max(1, Math.min(31, Number(v) || 1));
+  store.settings = { ...store.settings, standardPriceReviewDay: n };
+};
+const setMarkup = (v) => {
+  const n = Math.max(0, Math.min(500, Number(v) || 30));
+  store.settings = { ...store.settings, defaultSaleMarkupPercent: n };
+};
+// آخرین بازنگری (از مواد) + هشدار بیش از ۳۰ روز
+const lastStdReview = computed(() => {
+  const dates = store.ingredients.map((i) => i.standardPriceUpdatedAt).filter(Boolean).sort();
+  return dates[dates.length - 1] || null;
+});
+const stdReviewStale = computed(() => {
+  if (!lastStdReview.value) return true;
+  const [y, m, d] = lastStdReview.value.split('/').map(Number);
+  const last = y * 365 + m * 31 + d;
+  const [ty, tm, td] = jalaliTodayString().split('/').map(Number);
+  return (ty * 365 + tm * 31 + td) - last > 30;
+});
 
 /* ============ تب ماژول خرید (فاز ۲) ============ */
 const PURCHASE_FLAGS = [
@@ -1294,6 +1343,34 @@ const editingRoleName = computed(() => (store.roles.find((r) => r.id === roleEdi
       </div>
     </div>
 
+    <!-- ============ تب قیمت استاندارد (فاز ۳.۵) ============ -->
+    <div v-else-if="tab === 'std_pricing'" class="max-w-3xl space-y-4">
+      <div class="bg-white border border-slate-200 rounded-2xl p-6 space-y-4">
+        <h3 class="font-black text-sm text-slate-800">بهای استاندارد مواد (لایه بودجه)</h3>
+        <div
+          class="rounded-2xl p-3.5 text-[11px] font-bold border"
+          :class="stdReviewStale ? 'bg-amber-50 border-amber-300 text-amber-900' : 'bg-emerald-50 border-emerald-200 text-emerald-900'"
+        >
+          {{ stdReviewStale
+            ? 'هشدار: بازنگری قیمت استاندارد بیش از ۳۰ روز است انجام نشده یا هرگز انجام نشده است.'
+            : `آخرین بازنگری: ${toFa(lastStdReview)}` }}
+        </div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
+            <label class="block text-xs font-bold text-slate-700 mb-1.5">روز ماه برای بازنگری دوره‌ای:</label>
+            <FaNumberInput :model-value="String(store.settings.standardPriceReviewDay || 1)" :class="`${inputCls} text-center`" @update:model-value="setReviewDay" />
+          </div>
+          <div>
+            <label class="block text-xs font-bold text-slate-700 mb-1.5">درصد سود پیشنهادی روی بهای جایگزینی:</label>
+            <FaNumberInput :model-value="String(store.settings.defaultSaleMarkupPercent ?? 30)" :class="`${inputCls} text-center`" @update:model-value="setMarkup" />
+          </div>
+        </div>
+        <button class="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-black flex items-center gap-1.5" @click="openStdReview">
+          <Calculator class="w-4 h-4" /> بازنگری قیمت استاندارد
+        </button>
+      </div>
+    </div>
+
     <!-- ============ تب ماژول خرید (فاز ۲) ============ -->
     <div v-else-if="tab === 'purchase_modules'" class="max-w-2xl space-y-4">
       <div class="bg-white border border-slate-200 rounded-2xl p-6 space-y-3">
@@ -1762,6 +1839,40 @@ const editingRoleName = computed(() => (store.roles.find((r) => r.id === roleEdi
       <p class="text-xs font-bold text-amber-800">
         تعریف و ویرایش نقش‌ها فقط توسط <strong>کاربر ادمین</strong> مجاز است.
       </p>
+    </div>
+
+    <!-- مودال بازنگری قیمت استاندارد (فاز ۳.۵) -->
+    <div v-if="spF" class="fixed inset-0 z-[97] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
+      <div class="bg-white rounded-3xl shadow-2xl max-w-2xl w-full my-8">
+        <div class="p-4 border-b flex items-center justify-between">
+          <h3 class="text-sm font-black text-slate-900">بازنگری قیمت استاندارد مواد</h3>
+          <button class="p-2 text-slate-400 hover:bg-slate-100 rounded-xl" @click="spF = null"><X class="w-5 h-5" /></button>
+        </div>
+        <div class="p-4 max-h-[60vh] overflow-y-auto">
+          <table class="w-full text-right text-xs">
+            <thead class="bg-slate-50 font-black text-slate-700 border-b border-slate-200">
+              <tr>
+                <th class="p-2.5">ماده</th>
+                <th class="p-2.5 text-center">بهای فعلی</th>
+                <th class="p-2.5 text-center w-32">بهای استاندارد جدید</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-100">
+              <tr v-for="r in spF.rows" :key="r.id" class="hover:bg-slate-50">
+                <td class="p-2.5 font-bold text-slate-800">{{ r.name }} <span class="text-slate-400 text-[10px]">({{ r.unit }})</span></td>
+                <td class="p-2.5 text-center text-slate-500">{{ formatMoney(r.current) }}</td>
+                <td class="p-2.5">
+                  <FaNumberInput v-model="r.standardPrice" :class="`${inputCls} text-center font-black`" />
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="p-4 border-t flex gap-2">
+          <button class="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-black" @click="saveStdReview">ذخیره بازنگری</button>
+          <button class="flex-1 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold" @click="spF = null">انصراف</button>
+        </div>
+      </div>
     </div>
 
     <!-- مودال تأیید حذف -->

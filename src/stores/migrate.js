@@ -72,6 +72,35 @@ export function migrateData(data) {
     if (data.settings.enableBatchTracking === undefined) data.settings.enableBatchTracking = false;
     if (data.settings.enableExpiryTracking === undefined) data.settings.enableExpiryTracking = false;
     if (data.settings.enableFifoReport === undefined) data.settings.enableFifoReport = false;
+    // فاز ۳.۵ — بهای تمام‌شده سه‌لایه
+    if (data.settings.standardPriceReviewDay === undefined) data.settings.standardPriceReviewDay = 1;
+    if (data.settings.defaultSaleMarkupPercent === undefined) data.settings.defaultSaleMarkupPercent = 30;
+  }
+  // فاز ۳.۵ — سه لایه قیمت مواد: avgPrice (تاریخی) / price (جایگزینی) / standardPrice (استاندارد)
+  if (Array.isArray(data.ingredients)) {
+    data.ingredients = data.ingredients.map((ing) => {
+      let out = {
+        ...ing,
+        avgPrice: ing.avgPrice ?? (Number(ing.price) || 0),
+        standardPrice: ing.standardPrice ?? (Number(ing.price) || 0),
+        standardPriceUpdatedAt: ing.standardPriceUpdatedAt ?? null,
+        priceHistory: Array.isArray(ing.priceHistory) ? ing.priceHistory : [],
+      };
+      // بازسازی priceHistory از moves ورودی (اگر خالی است)
+      if (out.priceHistory.length === 0 && Array.isArray(data.moves)) {
+        out.priceHistory = data.moves
+          .filter((m) => m.type === 'in' && m.ingredientId === ing.id && (Number(m.price) || 0) > 0)
+          .sort((a, b) => (a.date > b.date ? 1 : -1))
+          .map((m) => ({
+            date: m.date,
+            price: Math.round(Number(m.price) || 0),
+            supplierId: m.supplierId || '',
+            moveId: m.id,
+            qty: Number(m.qty) || 0,
+          }));
+      }
+      return out;
+    });
   }
   return data;
 }

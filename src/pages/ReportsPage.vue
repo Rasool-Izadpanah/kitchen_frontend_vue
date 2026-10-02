@@ -6,9 +6,13 @@
  * داده‌ها همه از useAppStore می‌آیند؛ قیمت فروش دستی مستقیم روی store.dishes ذخیره می‌شود.
  */
 import { ref, computed } from 'vue';
-import { BarChart3, Users, TrendingUp, Printer, ShoppingBag, Calculator, ShoppingCart, Eye, X, AlertTriangle, Scale, Clock, PackageSearch } from 'lucide-vue-next';
+import { BarChart3, Users, TrendingUp, Printer, ShoppingBag, Calculator, ShoppingCart, Eye, X, AlertTriangle, Scale, Clock, PackageSearch, Boxes, Banknote } from 'lucide-vue-next';
 import { toFa, formatMoney, faDate, jalaliToJdn, faDatePretty, jalaliTodayString, jalaliOffsetString } from '../lib/utils.js';
 import { consumptionVariance, reservationsReport, expiryReport, supplierPerformance, foodCostOfDish } from '../lib/analytics.js';
+import {
+  dishCostReport, priceInflationReport, varianceCostReport,
+  inventoryValuation, supplierDebtReport,
+} from '../lib/costing.js';
 import { useAppStore } from '../stores/app.js';
 import { inputCls } from '../components/ui/inputCls.js';
 import EmptyRow from '../components/ui/EmptyRow.vue';
@@ -252,6 +256,19 @@ const consumptionChart = computed(() => {
   return days;
 });
 const consumptionMax = computed(() => Math.max(1, ...consumptionChart.value.map((d) => d.qty)));
+
+// ===== فاز ۳.۵: بهای تمام‌شده سه‌لایه =====
+const dishCostRows = computed(() => dishCostReport(store));
+const inflationRows = computed(() => priceInflationReport(store).filter((r) => r.hasData));
+const topInflation = computed(() => inflationRows.value.filter((r) => (r.growth30 || 0) >= 10).sort((a, b) => (b.growth30 || 0) - (a.growth30 || 0)));
+const varCostRows = computed(() => varianceCostReport(store));
+const varCostTotal = computed(() => varCostRows.value.reduce((s, r) => s + r.priceVariance, 0));
+const invValuation = computed(() => inventoryValuation(store));
+const supplierDebt = computed(() => supplierDebtReport(store));
+// انتخاب ماده برای نمودار روند قیمت
+const inflIngId = ref('');
+const inflSelected = computed(() => inflationRows.value.find((r) => r.ing.id === inflIngId.value) || inflationRows.value[0] || null);
+const inflMax = computed(() => (inflSelected.value ? Math.max(...inflSelected.value.rows.map((r) => r.price), 1) : 1));
 
 const planStatusMeta = (status) => ({
   temp: { label: 'موقت', cls: 'bg-amber-100 text-amber-700' },
@@ -927,6 +944,233 @@ const TABS = [
                 </span>
               </td>
               <td class="p-3 text-rose-700 text-[11px] font-bold">{{ inv.mismatchNotes || '—' }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ===== تب بهای تمام‌شده سه‌لایه (فاز ۳.۵) ===== -->
+    <div v-if="tab === 'threewaycost'" class="space-y-4">
+      <div class="bg-white rounded-2xl border border-slate-200 p-4 flex items-center gap-3">
+        <div class="p-3 bg-indigo-50 text-indigo-700 rounded-2xl"><Calculator class="w-6 h-6" /></div>
+        <div class="flex-1">
+          <h2 class="text-base font-black text-slate-900">بهای تمام‌شده سه‌لایه غذاها</h2>
+          <p class="text-[11px] text-slate-500">بر اساس آخرین برنامه پخت تأییدشده هر غذا — تاریخی (میانگین موزون) / جایگزینی (آخرین خرید) / استاندارد (مصوب)</p>
+        </div>
+        <span class="text-[10px] font-bold text-slate-500">درصد سود پیشنهادی: {{ toFa(store.settings.defaultSaleMarkupPercent ?? 30) }}٪</span>
+      </div>
+
+      <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+        <table class="w-full text-right text-xs">
+          <thead class="bg-slate-50 font-black text-slate-700 border-b border-slate-200">
+            <tr>
+              <th class="p-3">غذا</th>
+              <th class="p-3 text-center">بهای تاریخی</th>
+              <th class="p-3 text-center">بهای جایگزینی</th>
+              <th class="p-3 text-center">بهای استاندارد</th>
+              <th class="p-3 text-center">قیمت فروش فعلی</th>
+              <th class="p-3 text-center">حاشیه (تاریخی)</th>
+              <th class="p-3 text-center">حاشیه (جایگزینی)</th>
+              <th class="p-3 text-center">قیمت پیشنهادی</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100">
+            <EmptyRow v-if="dishCostRows.filter((r) => r.hasCost).length === 0" :col-span="8" text="برنامه پخت تأییدشده‌ای وجود ندارد — پس از تأیید نهایی مدیر، بهای محاسبه می‌شود" />
+            <tr v-for="r in dishCostRows.filter((x) => x.hasCost)" v-else :key="r.dish.id" class="hover:bg-slate-50">
+              <td class="p-3 font-black text-slate-800">{{ r.dish.name }}</td>
+              <td class="p-3 text-center tabular-nums">{{ formatMoney(r.costH) }}</td>
+              <td class="p-3 text-center font-black tabular-nums text-amber-700">{{ formatMoney(r.costR) }}</td>
+              <td class="p-3 text-center tabular-nums text-sky-700">{{ formatMoney(r.costS) }}</td>
+              <td class="p-3 text-center tabular-nums">{{ formatMoney(r.dish.price) }}</td>
+              <td class="p-3 text-center font-black" :class="r.marginHist === null ? 'text-slate-400' : r.marginHist < 0 ? 'text-rose-600' : 'text-emerald-600'">{{ r.marginHist === null ? '—' : `${toFa(r.marginHist)}٪` }}</td>
+              <td class="p-3 text-center font-black" :class="r.marginRepl === null ? 'text-slate-400' : r.marginRepl < 0 ? 'text-rose-600' : 'text-emerald-600'">{{ r.marginRepl === null ? '—' : `${toFa(r.marginRepl)}٪` }}</td>
+              <td class="p-3 text-center font-black tabular-nums text-indigo-700">{{ formatMoney(r.suggested) }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ===== تب روند قیمت مواد (فاز ۳.۵) ===== -->
+    <div v-if="tab === 'priceinflation'" class="space-y-4">
+      <div class="bg-white rounded-2xl border border-slate-200 p-4 flex items-center gap-3">
+        <div class="p-3 bg-rose-50 text-rose-700 rounded-2xl"><TrendingUp class="w-6 h-6" /></div>
+        <div class="flex-1">
+          <h2 class="text-base font-black text-slate-900">روند تورم مواد</h2>
+          <p class="text-[11px] text-slate-500">رشد قیمت بر اساس تاریخچه خرید هر ماده (priceHistory) — هشدار رشد بیش از ۱۰٪ در ۳۰ روز</p>
+        </div>
+      </div>
+
+      <div v-if="topInflation.length > 0" class="bg-rose-50 border border-rose-200 rounded-2xl p-4 space-y-1.5">
+        <div class="text-xs font-black text-rose-900 flex items-center gap-1.5"><AlertTriangle class="w-4 h-4" /> هشدار تورم ۳۰ روز اخیر:</div>
+        <div v-for="r in topInflation" :key="r.ing.id" class="text-[11px] font-bold text-rose-800">
+          قیمت «{{ r.ing.name }}» در ۳۰ روز گذشته {{ toFa(r.growth30) }}٪ رشد داشته است ({{ formatMoney(r.newestPrice) }} {{ r.ing.unit }})
+        </div>
+      </div>
+
+      <div class="bg-white rounded-2xl border border-slate-200 p-5 space-y-4">
+        <div class="max-w-xs">
+          <label class="block text-xs font-bold text-slate-700 mb-1.5">انتخاب ماده:</label>
+          <SearchableSelect
+            v-model="inflIngId"
+            placeholder="-- انتخاب ماده --"
+            :options="inflationRows.map((r) => ({ value: r.ing.id, label: r.ing.name, searchText: r.ing.name }))"
+          />
+        </div>
+        <div v-if="inflSelected" class="space-y-2">
+          <div class="flex items-center gap-3 text-xs font-bold">
+            <span class="text-slate-700">{{ inflSelected.ing.name }}</span>
+            <span v-if="inflSelected.growth30 !== null" :class="(inflSelected.growth30 || 0) >= 10 ? 'text-rose-600 font-black' : 'text-emerald-600'">
+              رشد ۳۰ روز: {{ toFa(inflSelected.growth30) }}٪
+            </span>
+          </div>
+          <div class="flex items-end gap-1.5 h-36">
+            <div v-for="(h, i) in inflSelected.rows" :key="i" class="flex-1 flex flex-col items-center gap-1">
+              <span class="text-[8px] font-black text-slate-600 tabular-nums">{{ formatMoney(h.price) }}</span>
+              <div class="w-full bg-gradient-to-t from-rose-600 to-amber-400 rounded-t-lg" :style="{ height: `${Math.max(4, (h.price / inflMax) * 100)}%` }" />
+              <span class="text-[8px] text-slate-400 font-bold" dir="ltr">{{ toFa(h.date.slice(5)) }}</span>
+            </div>
+          </div>
+        </div>
+        <div v-else class="text-xs text-slate-400 font-bold py-6 text-center">تاریخچه قیمتی یافت نشد — با ثبت رسید انبار همراه قیمت، تاریخچه ساخته می‌شود</div>
+      </div>
+    </div>
+
+    <!-- ===== تب واریانس قیمت (فاز ۳.۵) ===== -->
+    <div v-if="tab === 'costvariance'" class="space-y-4">
+      <div class="bg-white rounded-2xl border border-slate-200 p-4 flex items-center gap-3">
+        <div class="p-3 bg-amber-50 text-amber-700 rounded-2xl"><Scale class="w-6 h-6" /></div>
+        <div class="flex-1">
+          <h2 class="text-base font-black text-slate-900">واریانس قیمت مواد</h2>
+          <p class="text-[11px] text-slate-500">(بهای تاریخی − بهای جایگزینی) × مقدار مصرف در برنامه‌های تأییدشده — مثبت = قیمت امروز بالاتر از میانگین خرید</p>
+        </div>
+        <div class="text-left">
+          <div class="text-[9px] text-slate-500 font-bold">جمع واریانس</div>
+          <div class="text-sm font-black tabular-nums" :class="varCostTotal >= 0 ? 'text-rose-600' : 'text-emerald-600'">{{ formatMoney(varCostTotal) }}</div>
+        </div>
+      </div>
+
+      <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+        <table class="w-full text-right text-xs">
+          <thead class="bg-slate-50 font-black text-slate-700 border-b border-slate-200">
+            <tr>
+              <th class="p-3">ماده</th>
+              <th class="p-3 text-center">مقدار مصرف</th>
+              <th class="p-3 text-center">واریانس قیمت</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100">
+            <EmptyRow v-if="varCostRows.length === 0" :col-span="3" text="برنامه تأییدشده‌ای با تفصیل بهای ثبت نشده" />
+            <tr v-for="r in varCostRows" v-else :key="r.name" class="hover:bg-slate-50">
+              <td class="p-3 font-bold text-slate-800">{{ r.name }}</td>
+              <td class="p-3 text-center">{{ toFa(r.qtyUsed) }} {{ r.unit }}</td>
+              <td class="p-3 text-center font-black tabular-nums" :class="r.priceVariance > 0 ? 'text-rose-600' : 'text-emerald-600'">
+                {{ r.priceVariance > 0 ? '+' : '' }}{{ formatMoney(r.priceVariance) }}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ===== تب ارزش انبار (فاز ۳.۵) ===== -->
+    <div v-if="tab === 'inventoryvalue'" class="space-y-4">
+      <div class="bg-white rounded-2xl border border-slate-200 p-4 flex items-center gap-3">
+        <div class="p-3 bg-teal-50 text-teal-700 rounded-2xl"><Boxes class="w-6 h-6" /></div>
+        <div class="flex-1">
+          <h2 class="text-base font-black text-slate-900">ارزش موجودی انبار — سه‌لایه</h2>
+          <p class="text-[11px] text-slate-500">شاخص سود/زیان انبار = ارزش جایگزینی − ارزش تاریخی (نشان می‌دهد انبار در اثر تورم چقدر گران‌تر شده)</p>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div class="rounded-2xl bg-slate-50 border border-slate-200 p-3.5 text-center">
+          <div class="text-[10px] font-bold text-slate-500">ارزش تاریخی</div>
+          <div class="text-sm font-black text-slate-800 tabular-nums">{{ formatMoney(invValuation.total.hist) }}</div>
+        </div>
+        <div class="rounded-2xl bg-amber-50 border border-amber-200 p-3.5 text-center">
+          <div class="text-[10px] font-bold text-amber-600">ارزش جایگزینی</div>
+          <div class="text-sm font-black text-amber-800 tabular-nums">{{ formatMoney(invValuation.total.repl) }}</div>
+        </div>
+        <div class="rounded-2xl bg-sky-50 border border-sky-200 p-3.5 text-center">
+          <div class="text-[10px] font-bold text-sky-600">ارزش استاندارد</div>
+          <div class="text-sm font-black text-sky-800 tabular-nums">{{ formatMoney(invValuation.total.std) }}</div>
+        </div>
+        <div class="rounded-2xl border p-3.5 text-center" :class="invValuation.total.gain >= 0 ? 'bg-rose-50 border-rose-200' : 'bg-emerald-50 border-emerald-200'">
+          <div class="text-[10px] font-bold" :class="invValuation.total.gain >= 0 ? 'text-rose-600' : 'text-emerald-600'">{{ invValuation.total.gain >= 0 ? 'زیان نگهداری (تورم)' : 'سود نگهداری' }}</div>
+          <div class="text-sm font-black tabular-nums" :class="invValuation.total.gain >= 0 ? 'text-rose-800' : 'text-emerald-800'">{{ formatMoney(Math.abs(invValuation.total.gain)) }}</div>
+        </div>
+      </div>
+
+      <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+        <table class="w-full text-right text-xs">
+          <thead class="bg-slate-50 font-black text-slate-700 border-b border-slate-200">
+            <tr>
+              <th class="p-3">ماده</th>
+              <th class="p-3 text-center">مقدار</th>
+              <th class="p-3 text-center">میانگین</th>
+              <th class="p-3 text-center">آخرین خرید</th>
+              <th class="p-3 text-center">استاندارد</th>
+              <th class="p-3 text-left">ارزش تاریخی</th>
+              <th class="p-3 text-left">ارزش جایگزینی</th>
+              <th class="p-3 text-left">شاخص سود/زیان</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100">
+            <EmptyRow v-if="invValuation.rows.length === 0" :col-span="8" text="ماده‌ای در انبار نیست" />
+            <tr v-for="r in invValuation.rows" v-else :key="r.ing.id" class="hover:bg-slate-50">
+              <td class="p-3 font-bold text-slate-800">{{ r.ing.name }}</td>
+              <td class="p-3 text-center">{{ toFa(r.qty) }} {{ r.ing.unit }}</td>
+              <td class="p-3 text-center text-slate-500">{{ formatMoney(r.ing.avgPrice || 0) }}</td>
+              <td class="p-3 text-center text-slate-500">{{ formatMoney(r.ing.price || 0) }}</td>
+              <td class="p-3 text-center text-slate-500">{{ formatMoney(r.ing.standardPrice || 0) }}</td>
+              <td class="p-3 text-left tabular-nums">{{ formatMoney(r.hist) }}</td>
+              <td class="p-3 text-left tabular-nums">{{ formatMoney(r.repl) }}</td>
+              <td class="p-3 text-left font-black tabular-nums" :class="r.gain > 0 ? 'text-rose-600' : 'text-emerald-600'">{{ r.gain > 0 ? '+' : '' }}{{ formatMoney(r.gain) }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ===== تب بدهی تأمین‌کنندگان (فاز ۳.۵) ===== -->
+    <div v-if="tab === 'supplierdebt'" class="space-y-4">
+      <div class="bg-white rounded-2xl border border-slate-200 p-4 flex items-center gap-3">
+        <div class="p-3 bg-orange-50 text-orange-700 rounded-2xl"><Banknote class="w-6 h-6" /></div>
+        <div class="flex-1">
+          <h2 class="text-base font-black text-slate-900">بدهی به تأمین‌کنندگان</h2>
+          <p class="text-[11px] text-slate-500">فاکتورهای پرداخت‌نشده — با تأخیر در پرداخت، بدهی در برابر کالای گران‌شده مزیت نقدی ایجاد می‌کند</p>
+        </div>
+        <div class="text-left">
+          <div class="text-[9px] text-slate-500 font-bold">جمع بدهی</div>
+          <div class="text-sm font-black text-rose-600 tabular-nums">{{ formatMoney(supplierDebt.totalDebt) }}</div>
+        </div>
+      </div>
+
+      <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+        <table class="w-full text-right text-xs">
+          <thead class="bg-slate-50 font-black text-slate-700 border-b border-slate-200">
+            <tr>
+              <th class="p-3">فاکتور</th><th class="p-3">تأمین‌کننده</th><th class="p-3">تاریخ</th>
+              <th class="p-3 text-left">مبلغ کل</th><th class="p-3 text-left">پرداخت‌شده</th>
+              <th class="p-3 text-left">مانده بدهی</th><th class="p-3 text-center">وضعیت</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100">
+            <EmptyRow v-if="supplierDebt.rows.length === 0" :col-span="7" text="بدهی پرداخت‌نشده‌ای وجود ندارد" />
+            <tr v-for="r in supplierDebt.rows" v-else :key="r.inv.id" class="hover:bg-slate-50">
+              <td class="p-3 font-bold text-slate-800" dir="ltr">{{ r.invoiceNumber }}</td>
+              <td class="p-3">{{ r.supplierName }}</td>
+              <td class="p-3">{{ toFa(r.date) }}</td>
+              <td class="p-3 text-left tabular-nums">{{ formatMoney(r.inv.finalTotal) }}</td>
+              <td class="p-3 text-left tabular-nums text-emerald-600">{{ formatMoney(r.inv.paidAmount || 0) }}</td>
+              <td class="p-3 text-left font-black tabular-nums text-rose-600">{{ formatMoney(r.remaining) }}</td>
+              <td class="p-3 text-center">
+                <span class="px-2 py-1 rounded-full text-[9px] font-black" :class="r.inv.paymentStatus === 'partial' ? 'bg-amber-100 text-amber-700' : 'bg-rose-100 text-rose-700'">
+                  {{ r.inv.paymentStatus === 'partial' ? 'پرداخت جزئی' : 'پرداخت‌نشده' }}
+                </span>
+              </td>
             </tr>
           </tbody>
         </table>
