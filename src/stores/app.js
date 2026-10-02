@@ -7,7 +7,7 @@ import {
   INITIAL_USERS, INITIAL_UNITS, INITIAL_CUSTOMERS, INITIAL_DISHES,
   INITIAL_INGREDIENTS, INITIAL_RECIPES, INITIAL_STOCK_MOVES, INITIAL_INVOICES,
   INITIAL_SETTINGS, INITIAL_SUPPLIES, INITIAL_OVERHEADS, INITIAL_ROLES,
-  INITIAL_REJECTION_REASONS,
+  INITIAL_REJECTION_REASONS, INITIAL_SUPPLIERS,
 } from '../lib/seed.js';
 
 // نقش‌های ذخیره‌شده را با نسخه فعلی seed ادغام می‌کند تا کلیدهای مجوز
@@ -83,9 +83,14 @@ export function migrateData(data) {
       }));
     }
   });
-  // settings: timeout رزرو
+  // settings: timeout رزرو + کلیدهای فاز ۲
   if (data.settings && typeof data.settings === 'object') {
     if (data.settings.reservationTimeoutHours === undefined) data.settings.reservationTimeoutHours = 24;
+    if (data.settings.enableOnOrderInShortage === undefined) data.settings.enableOnOrderInShortage = false;
+    if (data.settings.enableQualityCheck === undefined) data.settings.enableQualityCheck = false;
+    if (data.settings.enableBatchTracking === undefined) data.settings.enableBatchTracking = false;
+    if (data.settings.enableExpiryTracking === undefined) data.settings.enableExpiryTracking = false;
+    if (data.settings.enableFifoReport === undefined) data.settings.enableFifoReport = false;
   }
   return data;
 }
@@ -114,6 +119,12 @@ export const useAppStore = defineStore('app', {
     stockRequests: safeStorage.get('kitchen_stock_requests', []),
     messages: safeStorage.get('kitchen_messages', []),
     rejectionReasons: safeStorage.get('kitchen_rejection_reasons', INITIAL_REJECTION_REASONS),
+
+    // فاز ۲ — چرخه خرید
+    suppliers: safeStorage.get('kitchen_suppliers', INITIAL_SUPPLIERS),
+    purchaseOrders: safeStorage.get('kitchen_purchase_orders', []),
+    goodsReceipts: safeStorage.get('kitchen_goods_receipts', []),
+    purchaseInvoices: safeStorage.get('kitchen_purchase_invoices', []),
 
     // ناوبری
     page: 'dashboard',
@@ -203,6 +214,7 @@ const PERSIST = [
   'users', 'roles', 'customers', 'dishes', 'ingredients', 'recipes', 'units',
   'invoices', 'moves', 'settings', 'supplies', 'plans', 'overheads',
   'preinvoices', 'purchaseRequests', 'stockRequests', 'messages', 'rejectionReasons',
+  'suppliers', 'purchaseOrders', 'goodsReceipts', 'purchaseInvoices',
 ];
 const KEY_MAP = {
   users: 'kitchen_users', roles: 'kitchen_roles', customers: 'kitchen_customers',
@@ -212,6 +224,8 @@ const KEY_MAP = {
   overheads: 'kitchen_overheads', preinvoices: 'kitchen_preinvoices',
   purchaseRequests: 'kitchen_purchase_requests', stockRequests: 'kitchen_stock_requests',
   messages: 'kitchen_messages', rejectionReasons: 'kitchen_rejection_reasons',
+  suppliers: 'kitchen_suppliers', purchaseOrders: 'kitchen_purchase_orders',
+  goodsReceipts: 'kitchen_goods_receipts', purchaseInvoices: 'kitchen_purchase_invoices',
 };
 
 export function setupPersistence(store) {

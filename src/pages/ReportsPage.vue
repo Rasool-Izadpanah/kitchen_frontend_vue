@@ -6,7 +6,7 @@
  * داده‌ها همه از useAppStore می‌آیند؛ قیمت فروش دستی مستقیم روی store.dishes ذخیره می‌شود.
  */
 import { ref, computed } from 'vue';
-import { BarChart3, Users, TrendingUp, Printer, ShoppingBag, Calculator, ShoppingCart, Eye, X } from 'lucide-vue-next';
+import { BarChart3, Users, TrendingUp, Printer, ShoppingBag, Calculator, ShoppingCart, Eye, X, AlertTriangle } from 'lucide-vue-next';
 import { toFa, formatMoney, faDate, jalaliToJdn, faDatePretty, jalaliTodayString } from '../lib/utils.js';
 import { useAppStore } from '../stores/app.js';
 import { inputCls } from '../components/ui/inputCls.js';
@@ -227,10 +227,18 @@ const prStatusMeta = (status) => ({
 // ===== تب گزارش برنامه‌های پخت =====
 const totalPlanPortions = computed(() => store.plans.reduce((s, p) => s + p.items.reduce((a, it) => a + it.qty, 0), 0));
 
+// فاکتورهای دارای مغایرت (فاز ۲)
+const mismatchInvoices = computed(() => (store.purchaseInvoices || []).filter((inv) => inv.matchStatus === 'mismatch'));
+
 const planStatusMeta = (status) => ({
   temp: { label: 'موقت', cls: 'bg-amber-100 text-amber-700' },
   final: { label: 'قطعی', cls: 'bg-emerald-100 text-emerald-700' },
+  draft: { label: 'پیش‌نویس', cls: 'bg-slate-100 text-slate-600' },
+  pending: { label: 'در انتظار تأیید سرآشپز', cls: 'bg-amber-100 text-amber-700' },
+  reserved: { label: 'رزرو شده', cls: 'bg-sky-100 text-sky-700' },
+  approved: { label: 'تأیید نهایی', cls: 'bg-emerald-100 text-emerald-700' },
   rejected: { label: 'رد شده', cls: 'bg-rose-100 text-rose-700' },
+  cancelled: { label: 'لغو شده', cls: 'bg-slate-100 text-slate-500' },
 }[status] || { label: status, cls: 'bg-slate-100 text-slate-600' });
 
 const planDishesSummary = (p) => p.items.map((it) => `${it.dishName} (${toFa(it.qty)})`).join(' + ');
@@ -857,6 +865,48 @@ const TABS = [
             </table>
           </div>
         </div>
+      </div>
+    </div>
+
+    <!-- تب مغایرت‌های خرید (فاز ۲) -->
+    <div v-if="tab === 'purchasemismatch'" class="space-y-4">
+      <div class="bg-white rounded-2xl border border-slate-200 p-4 flex items-center gap-3">
+        <div class="p-3 bg-rose-50 text-rose-700 rounded-2xl"><AlertTriangle class="w-6 h-6" /></div>
+        <div class="flex-1">
+          <h2 class="text-base font-black text-slate-900">مغایرت‌های خرید</h2>
+          <p class="text-[11px] text-slate-500">فاکتورهای خرید با مغایرت مقدار یا قیمت نسبت به سفارش و رسید انبار (PR ↔ PO ↔ GRN ↔ فاکتور)</p>
+        </div>
+        <span class="text-[11px] font-black text-slate-500">{{ toFa(mismatchInvoices.length) }} مغایرت از {{ toFa((store.purchaseInvoices || []).length) }} فاکتور</span>
+      </div>
+
+      <div v-if="(store.purchaseInvoices || []).length === 0" class="bg-white border border-dashed border-slate-300 rounded-3xl p-12 text-center text-slate-400 text-xs font-bold">هنوز فاکتور خریدی ثبت نشده است</div>
+      <div v-else class="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+        <table class="w-full text-right text-xs">
+          <thead class="bg-slate-50 font-black text-slate-700 border-b border-slate-200">
+            <tr>
+              <th class="p-3">فاکتور</th>
+              <th class="p-3">تأمین‌کننده</th>
+              <th class="p-3">تاریخ</th>
+              <th class="p-3 text-left">مبلغ نهایی</th>
+              <th class="p-3 text-center">وضعیت تطبیق</th>
+              <th class="p-3">شرح مغایرت</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100">
+            <tr v-for="inv in store.purchaseInvoices" :key="inv.id" class="hover:bg-slate-50" :class="inv.matchStatus === 'mismatch' ? 'bg-rose-50/40' : ''">
+              <td class="p-3 font-black text-slate-800" dir="ltr">{{ inv.invoiceNumber || inv.id }}</td>
+              <td class="p-3">{{ inv.supplierName }}</td>
+              <td class="p-3">{{ toFa(inv.date) }}</td>
+              <td class="p-3 text-left font-black tabular-nums">{{ formatMoney(inv.finalTotal) }}</td>
+              <td class="p-3 text-center">
+                <span class="px-2 py-1 rounded-full font-black text-[9px]" :class="inv.matchStatus === 'matched' ? 'bg-emerald-100 text-emerald-700' : inv.matchStatus === 'mismatch' ? 'bg-rose-100 text-rose-700' : 'bg-slate-100 text-slate-600'">
+                  {{ inv.matchStatus === 'matched' ? 'سازگار ✓' : inv.matchStatus === 'mismatch' ? 'مغایرت' : 'تطبیق‌نشده' }}
+                </span>
+              </td>
+              <td class="p-3 text-rose-700 text-[11px] font-bold">{{ inv.mismatchNotes || '—' }}</td>
+            </tr>
+          </tbody>
+        </table>
       </div>
     </div>
 

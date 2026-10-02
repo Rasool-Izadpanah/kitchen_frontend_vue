@@ -20,6 +20,7 @@ import InvoicePage from './pages/InvoicePage.vue';
 import PreInvoicePage from './pages/PreInvoicePage.vue';
 import CartablePage from './pages/CartablePage.vue';
 import PurchaseRequestPage from './pages/PurchaseRequestPage.vue';
+import PurchaseOrdersPage from './pages/PurchaseOrdersPage.vue';
 import WarehousePage from './pages/WarehousePage.vue';
 import ReportsPage from './pages/ReportsPage.vue';
 import SettingsPage from './pages/SettingsPage.vue';
@@ -54,6 +55,7 @@ const SIDEBAR = [
     id: 'warehouse', label: 'انبار', icon: Package,
     children: [
       { id: 'purchase-request', label: 'درخواست خرید کالا', page: 'purchasereq', perm: 'view_warehouse' },
+      { id: 'purchase-orders', label: 'سفارش خرید و رسید (فاز ۲)', page: 'purchaseorders', perm: 'create_purchase_order' },
       { id: 'wh-out', label: 'خروج کالا از انبار', page: 'warehouse', tab: 'out', perm: 'view_warehouse' },
       { id: 'wh-balance', label: 'موجودی انبار', page: 'warehouse', tab: 'balance', perm: 'view_warehouse' },
       { id: 'wh-cardex', label: 'کاردکس کالا', page: 'warehouse', tab: 'cardex', perm: 'view_warehouse' },
@@ -67,6 +69,7 @@ const SIDEBAR = [
       { id: 'rep-sales', label: 'گزارش فروش', page: 'reports', tab: 'performance', perm: 'view_reports' },
       { id: 'rep-discounts', label: 'تخفیف‌های ارائه‌شده', page: 'reports', tab: 'discounts', perm: 'view_reports' },
       { id: 'rep-purchase-req', label: 'لیست درخواست‌های خرید', page: 'reports', tab: 'purchaseRequests', perm: 'view_reports' },
+      { id: 'rep-purchase-mismatch', label: 'مغایرت‌های خرید', page: 'reports', tab: 'purchasemismatch', perm: 'view_reports' },
       { id: 'rep-cookplans', label: 'گزارش برنامه‌های پخت', page: 'reports', tab: 'cookplans', perm: 'view_reports' },
     ],
   },
@@ -274,6 +277,11 @@ const toggleSection = (id) => { manualSection.value = manualSection.value === id
         <template v-else>
           <PurchaseRequestPage
             v-if="store.page === 'purchasereq'"
+            :show-toast="store.showToast"
+            :user-name="userDisplay(store.currentUser)"
+          />
+          <PurchaseOrdersPage
+            v-if="store.page === 'purchaseorders'"
             :show-toast="store.showToast"
             :user-name="userDisplay(store.currentUser)"
           />

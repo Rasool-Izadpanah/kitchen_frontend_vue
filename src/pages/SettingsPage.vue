@@ -49,6 +49,7 @@ const GROUPS = [
       { id: 'units', label: 'واحد اندازه‌گیری', icon: Ruler },
       { id: 'rejection_reasons', label: 'دلایل رد', icon: AlertTriangle },
       { id: 'reservation_timeout', label: 'مهلت رزرو', icon: Clock3 },
+      { id: 'purchase_modules', label: 'ماژول خرید', icon: Package2 },
       { id: 'tax', label: 'نرخ مالیات', icon: Percent },
       { id: 'overheads', label: 'هزینه‌های سربار', icon: Receipt },
       { id: 'currency', label: 'واحد پول', icon: Coins },
@@ -429,6 +430,19 @@ const convChainText = (u) => {
     cur = x.baseUnit;
   }
   return parts.join(' ← ');
+};
+
+/* ============ تب ماژول خرید (فاز ۲) ============ */
+const PURCHASE_FLAGS = [
+  { key: 'enableOnOrderInShortage', label: 'نمایش «موجودی در راه» در کسری', desc: 'سفارش‌های ارسال‌شده ولی دریافت‌نشده در محاسبه کسری لحاظ می‌شوند' },
+  { key: 'enableQualityCheck', label: 'کنترل کیفیت در رسید انبار', desc: 'ستون کیفیت OK در فرم GRN نمایش داده می‌شود' },
+  { key: 'enableBatchTracking', label: 'ردیابی بچ (Batch)', desc: 'شماره بچ برای هر قلم رسید ثبت می‌شود' },
+  { key: 'enableExpiryTracking', label: 'ردیابی تاریخ انقضا', desc: 'تاریخ انقضا برای هر قلم رسید ثبت می‌شود' },
+  { key: 'enableFifoReport', label: 'گزارش FIFO و اقلام نزدیک انقضا', desc: 'در گزارش‌ها فعال می‌شود (نیازمند ردیابی بچ)' },
+];
+const toggleFlag = (key) => {
+  store.settings = { ...store.settings, [key]: !store.settings[key] };
+  toast('تنظیم ماژول خرید ذخیره شد');
 };
 
 /* ============ تب دلایل رد (فاز ۱) ============ */
@@ -1277,6 +1291,21 @@ const editingRoleName = computed(() => (store.roles.find((r) => r.id === roleEdi
             </template>
           </tbody>
         </table>
+      </div>
+    </div>
+
+    <!-- ============ تب ماژول خرید (فاز ۲) ============ -->
+    <div v-else-if="tab === 'purchase_modules'" class="max-w-2xl space-y-4">
+      <div class="bg-white border border-slate-200 rounded-2xl p-6 space-y-3">
+        <h3 class="font-black text-sm text-slate-800">کلیدهای فعال‌سازی چرخه خرید</h3>
+        <p class="text-[11px] text-slate-500">این قابلیت‌ها به‌صورت اختیاری فعال می‌شوند — صفحات مرتبط فقط وقتی کلید روشن باشد فیلد مربوط را نشان می‌دهند.</p>
+        <label v-for="f in PURCHASE_FLAGS" :key="f.key" class="flex items-start gap-3 rounded-2xl border border-slate-200 p-3.5 hover:bg-slate-50 cursor-pointer transition">
+          <input type="checkbox" :checked="!!store.settings[f.key]" @change="toggleFlag(f.key)" class="mt-0.5 w-4.5 h-4.5 accent-emerald-600 cursor-pointer" />
+          <span>
+            <span class="block text-xs font-black text-slate-800">{{ f.label }}</span>
+            <span class="block text-[10px] text-slate-500 mt-0.5">{{ f.desc }}</span>
+          </span>
+        </label>
       </div>
     </div>
 

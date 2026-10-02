@@ -148,7 +148,20 @@ export const INITIAL_SETTINGS = {
   economicCode: '',
   phone: '',
   address: '',
+  // فاز ۲ — کلیدهای ماژول خرید
+  enableOnOrderInShortage: false,
+  enableQualityCheck: false,
+  enableBatchTracking: false,
+  enableExpiryTracking: false,
+  enableFifoReport: false,
 };
+
+// ===== فاز ۲ — تأمین‌کنندگان =====
+export const INITIAL_SUPPLIERS = [
+  { id: 'sup_1', name: 'پخش عمده مواد غذایی باران', phone: '02155667788', address: 'تهران، بازار بزرگ', economicCode: '', nationalId: '', notes: 'تحویل صبح‌ها', active: true },
+  { id: 'sup_2', name: 'گوشت و مرغ بهشتی', phone: '02188990011', address: 'تهران، خیابان بهارستان', economicCode: '', nationalId: '', notes: 'فقط مرغ تازه', active: true },
+  { id: 'sup_3', name: 'سبزیجات مزارع البرز', phone: '02634445566', address: 'کرج، جاده کرج', economicCode: '', nationalId: '', notes: '', active: true },
+];
 
 // فونت‌های فارسی قابل انتخاب (نام = font-family در CDN رستیکردار)
 export const FONT_OPTIONS = [
@@ -182,6 +195,12 @@ export const PERMISSIONS = [
   { key: 'approve_cookplan', label: 'تأیید برنامه پخت و رزرو مواد (سرآشپز)', group: 'کارتابل' },
   { key: 'final_approve_cookplan', label: 'تأیید نهایی برنامه پخت و مصرف مواد (مدیر)', group: 'کارتابل' },
   { key: 'reject_cookplan', label: 'رد برنامه پخت', group: 'کارتابل' },
+  { key: 'create_purchase_order', label: 'صدور سفارش خرید (PO)', group: 'خرید' },
+  { key: 'receive_goods', label: 'ثبت رسید انبار (GRN)', group: 'انبار' },
+  { key: 'quality_check', label: 'کنترل کیفیت رسید', group: 'انبار' },
+  { key: 'record_purchase_invoice', label: 'ثبت فاکتور خرید', group: 'خرید' },
+  { key: 'three_way_match', label: 'تطبیق سه‌طرفه', group: 'خرید' },
+  { key: 'manage_suppliers', label: 'مدیریت تأمین‌کنندگان', group: 'تعاریف' },
   { key: 'dailycook', label: 'برنامه پخت روزانه', group: 'عملیات' },
   { key: 'create_invoice', label: 'صدور فاکتور فروش', group: 'عملیات' },
   { key: 'edit_preinvoice', label: 'ویرایش پیش‌فاکتور', group: 'عملیات' },
@@ -215,6 +234,7 @@ export const INITIAL_ROLES = [
       manage_customers: true, manage_dishes: true, manage_ingredients: true,
       manage_recipes: true, manage_supplies: true,
       final_approve_cookplan: true, reject_cookplan: true, view_reservations: true,
+      create_purchase_order: true, record_purchase_invoice: true, three_way_match: true, manage_suppliers: true,
     }
   },
   {
@@ -229,6 +249,7 @@ export const INITIAL_ROLES = [
       ...allPerms(false),
       view_dashboard: true, view_warehouse: true, view_reports: true,
       view_reservations: true,
+      receive_goods: true, quality_check: true,
     }
   },
 ];
