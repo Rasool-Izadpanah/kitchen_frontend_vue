@@ -3,12 +3,13 @@
  * داشبورد — معادل Dashboard.jsx
  * سه کاشی: گزارش فروش روز | هشدار کمبود انبار | پخت و فروش امروز
  */
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 import {
   TrendingUp, AlertTriangle, Utensils, BadgeDollarSign, FileText, Clock,
   ShoppingCart, ChefHat, ChevronLeft, CookingPot, Boxes,
 } from 'lucide-vue-next';
 import { toFa, formatMoney, faDatePretty, jalaliTodayString } from '../lib/utils.js';
+import { dashboardAlerts } from '../lib/analytics.js';
 import { useAppStore } from '../stores/app.js';
 
 const store = useAppStore();
@@ -90,6 +91,17 @@ const cookRows = computed(() => {
     remaining: Math.max(0, (cookedByDish.value[n] || 0) - (soldByDish.value[n] || 0)),
   })).sort((a, b) => b.cooked - a.cooked);
 });
+
+// ===== فاز ۳: هشدارهای یکپارچه =====
+const alerts = computed(() => dashboardAlerts(store));
+const dangerAlerts = computed(() => alerts.value.filter((a) => a.severity === 'danger'));
+const showAllAlerts = ref(false);
+const visibleAlerts = computed(() => (showAllAlerts.value ? alerts.value : alerts.value.slice(0, 5)));
+const ALERT_STYLES = {
+  danger: { row: 'bg-rose-50 border-rose-300 text-rose-900', dot: 'bg-rose-500' },
+  warning: { row: 'bg-amber-50 border-amber-200 text-amber-900', dot: 'bg-amber-500' },
+  info: { row: 'bg-sky-50 border-sky-200 text-sky-900', dot: 'bg-sky-500' },
+};
 </script>
 
 <template>
@@ -110,6 +122,37 @@ const cookRows = computed(() => {
             <h2 class="text-base sm:text-xl font-black leading-snug">مدیریت آشپزخانه نسیم</h2>
             <p class="text-emerald-100/85 text-[11px] sm:text-xs font-medium">( وابسته به بنیاد خیریه سیدالشهدا (ع) )</p>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== فاز ۳: نوار هشدارهای یکپارچه ===== -->
+    <div
+      v-if="alerts.length > 0"
+      class="bg-white rounded-3xl border p-4 space-y-2"
+      :class="dangerAlerts.length > 0 ? 'border-rose-300' : 'border-slate-200'"
+    >
+      <div class="flex items-center justify-between">
+        <div class="flex items-center gap-2 text-xs font-black text-slate-800">
+          <span class="relative flex w-2.5 h-2.5">
+            <span v-if="dangerAlerts.length > 0" class="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span>
+            <span class="relative inline-flex rounded-full w-2.5 h-2.5" :class="dangerAlerts.length > 0 ? 'bg-rose-500' : 'bg-amber-500'"></span>
+          </span>
+          هشدارها ({{ toFa(alerts.length) }})
+        </div>
+        <button v-if="alerts.length > 5" class="text-[10px] font-black text-indigo-600 hover:underline" @click="showAllAlerts = !showAllAlerts">
+          {{ showAllAlerts ? 'نمایش کمتر' : `نمایش همه (${toFa(alerts.length)})` }}
+        </button>
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+        <div
+          v-for="(a, i) in visibleAlerts"
+          :key="i"
+          class="flex items-center gap-2 rounded-xl border px-3 py-1.5 text-[11px] font-bold"
+          :class="ALERT_STYLES[a.severity].row"
+        >
+          <span class="w-1.5 h-1.5 rounded-full shrink-0" :class="ALERT_STYLES[a.severity].dot" />
+          {{ a.text }}
         </div>
       </div>
     </div>

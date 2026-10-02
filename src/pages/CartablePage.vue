@@ -757,6 +757,15 @@ const viewingDecided = computed(() => (viewingRow.value ? viewingRow.value.items
               {{ row.stage === 'reserved' ? 'در انتظار تأیید مدیر' : 'در انتظار تأیید سرآشپز' }}
             </span>
             <span v-else class="text-[9px] font-black px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">موقت</span>
+            <!-- فاز ۳: Timeout باقی‌مانده رزرو -->
+            <span
+              v-if="row.type === 'cookplan' && row.stage === 'reserved' && row.raw.reservationExpiresAt"
+              class="text-[9px] font-black px-2 py-0.5 rounded-full tabular-nums"
+              :class="(row.raw.reservationExpiresAt - Date.now()) <= 3600000 ? 'bg-rose-100 text-rose-700' : 'bg-slate-100 text-slate-600'"
+              title="مهلت رزرو — پس از انقضا رزرو خودکار آزاد می‌شود"
+            >
+              ⏱ {{ toFa(Math.max(0, Math.ceil((row.raw.reservationExpiresAt - Date.now()) / 3600000))) }} ساعت
+            </span>
           </div>
           <div class="text-[10px] text-slate-500 font-bold mt-0.5 flex items-center gap-2 flex-wrap">
             <span>{{ TYPE_META[row.type].label }}</span> · <span>{{ toFa(row.date) }}</span>

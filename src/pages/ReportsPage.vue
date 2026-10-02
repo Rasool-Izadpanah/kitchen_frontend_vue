@@ -6,8 +6,9 @@
  * داده‌ها همه از useAppStore می‌آیند؛ قیمت فروش دستی مستقیم روی store.dishes ذخیره می‌شود.
  */
 import { ref, computed } from 'vue';
-import { BarChart3, Users, TrendingUp, Printer, ShoppingBag, Calculator, ShoppingCart, Eye, X, AlertTriangle } from 'lucide-vue-next';
-import { toFa, formatMoney, faDate, jalaliToJdn, faDatePretty, jalaliTodayString } from '../lib/utils.js';
+import { BarChart3, Users, TrendingUp, Printer, ShoppingBag, Calculator, ShoppingCart, Eye, X, AlertTriangle, Scale, Clock, PackageSearch } from 'lucide-vue-next';
+import { toFa, formatMoney, faDate, jalaliToJdn, faDatePretty, jalaliTodayString, jalaliOffsetString } from '../lib/utils.js';
+import { consumptionVariance, reservationsReport, expiryReport, supplierPerformance, foodCostOfDish } from '../lib/analytics.js';
 import { useAppStore } from '../stores/app.js';
 import { inputCls } from '../components/ui/inputCls.js';
 import EmptyRow from '../components/ui/EmptyRow.vue';
@@ -229,6 +230,28 @@ const totalPlanPortions = computed(() => store.plans.reduce((s, p) => s + p.item
 
 // فاکتورهای دارای مغایرت (فاز ۲)
 const mismatchInvoices = computed(() => (store.purchaseInvoices || []).filter((inv) => inv.matchStatus === 'mismatch'));
+
+// ===== فاز ۳: گزارش‌های پیشرفته =====
+const varianceRows = computed(() => consumptionVariance(store));
+const varianceFooter = computed(() => ({
+  over: varianceRows.value.filter((r) => r.status === 'over').length,
+  under: varianceRows.value.filter((r) => r.status === 'under').length,
+  ok: varianceRows.value.filter((r) => r.status === 'ok').length,
+}));
+const reservationsRep = computed(() => reservationsReport(store));
+const expiryLots = computed(() => expiryReport(store));
+const supplierPerf = computed(() => supplierPerformance(store));
+// نمودار مصرف ۷ روز اخیر (بر اساس moves مصرف و خروج)
+const consumptionChart = computed(() => {
+  const days = [];
+  for (let i = 6; i >= 0; i--) {
+    const dateStr = jalaliOffsetString(-i);
+    const qty = (store.moves || []).filter((mv) => (mv.type === 'consume' || mv.type === 'out') && mv.date === dateStr).reduce((s, mv) => s + (mv.qty || 0), 0);
+    days.push({ date: dateStr, qty: Math.round(qty * 10) / 10 });
+  }
+  return days;
+});
+const consumptionMax = computed(() => Math.max(1, ...consumptionChart.value.map((d) => d.qty)));
 
 const planStatusMeta = (status) => ({
   temp: { label: 'موقت', cls: 'bg-amber-100 text-amber-700' },
@@ -904,6 +927,201 @@ const TABS = [
                 </span>
               </td>
               <td class="p-3 text-rose-700 text-[11px] font-bold">{{ inv.mismatchNotes || '—' }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ===== تب مصرف واقعی vs استاندارد (فاز ۳) ===== -->
+    <div v-if="tab === 'variance'" class="space-y-4">
+      <div class="bg-white rounded-2xl border border-slate-200 p-4 flex items-center gap-3">
+        <div class="p-3 bg-violet-50 text-violet-700 rounded-2xl"><Scale class="w-6 h-6" /></div>
+        <div class="flex-1">
+          <h2 class="text-base font-black text-slate-900">مصرف واقعی در برابر استاندارد رسپی</h2>
+          <p class="text-[11px] text-slate-500">مقایسه مواد مصرف‌شده در برنامه‌های تأییدشده با استاندارد رسپی (با احتساب پرتی) — اختلاف = ضایعات/هدر</p>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-3 gap-3">
+        <div class="rounded-2xl bg-rose-50 border border-rose-200 p-3.5 text-center">
+          <div class="text-[10px] font-bold text-rose-600">مصرف بیش از استاندارد</div>
+          <div class="text-xl font-black text-rose-800">{{ toFa(varianceFooter.over) }}</div>
+        </div>
+        <div class="rounded-2xl bg-emerald-50 border border-emerald-200 p-3.5 text-center">
+          <div class="text-[10px] font-bold text-emerald-600">مطابق استاندارد</div>
+          <div class="text-xl font-black text-emerald-800">{{ toFa(varianceFooter.ok) }}</div>
+        </div>
+        <div class="rounded-2xl bg-sky-50 border border-sky-200 p-3.5 text-center">
+          <div class="text-[10px] font-bold text-sky-600">کمتر از استاندارد</div>
+          <div class="text-xl font-black text-sky-800">{{ toFa(varianceFooter.under) }}</div>
+        </div>
+      </div>
+
+      <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+        <table class="w-full text-right text-xs">
+          <thead class="bg-slate-50 font-black text-slate-700 border-b border-slate-200">
+            <tr>
+              <th class="p-3">#</th><th class="p-3">ماده</th>
+              <th class="p-3 text-center">استاندارد</th><th class="p-3 text-center">مصرف واقعی</th>
+              <th class="p-3 text-center">اختلاف</th><th class="p-3 text-center">درصد</th><th class="p-3 text-center">وضعیت</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100">
+            <EmptyRow v-if="varianceRows.length === 0" :col-span="7" text="برنامه تأییدشده‌ای برای مقایسه وجود ندارد" />
+            <tr v-for="(r, i) in varianceRows" v-else :key="r.ingredientId" class="hover:bg-slate-50" :class="r.status === 'over' ? 'bg-rose-50/40' : ''">
+              <td class="p-3 text-slate-400">{{ toFa(i + 1) }}</td>
+              <td class="p-3 font-bold text-slate-800">{{ r.name }}</td>
+              <td class="p-3 text-center">{{ toFa(r.standard) }} {{ r.unit }}</td>
+              <td class="p-3 text-center font-black">{{ toFa(r.actual) }} {{ r.unit }}</td>
+              <td class="p-3 text-center font-black" :class="r.status === 'over' ? 'text-rose-600' : r.status === 'under' ? 'text-sky-600' : 'text-emerald-600'">
+                {{ r.variance > 0 ? '+' : '' }}{{ toFa(r.variance) }}
+              </td>
+              <td class="p-3 text-center">{{ toFa(r.variancePct) }}٪</td>
+              <td class="p-3 text-center">
+                <span class="px-2 py-1 rounded-full text-[9px] font-black" :class="r.status === 'over' ? 'bg-rose-100 text-rose-700' : r.status === 'under' ? 'bg-sky-100 text-sky-700' : 'bg-emerald-100 text-emerald-700'">
+                  {{ r.status === 'over' ? 'هدررفته' : r.status === 'under' ? 'کمتر' : 'مطابق' }}
+                </span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- نمودار مصرف ۷ روز اخیر -->
+      <div class="bg-white rounded-2xl border border-slate-200 p-5 space-y-3">
+        <h3 class="text-sm font-black text-slate-800">مصرف انبار — ۷ روز اخیر (مجموع اقلام)</h3>
+        <div class="flex items-end gap-2 h-40">
+          <div v-for="d in consumptionChart" :key="d.date" class="flex-1 flex flex-col items-center gap-1.5">
+            <span class="text-[9px] font-black text-slate-600 tabular-nums">{{ toFa(d.qty) }}</span>
+            <div class="w-full bg-gradient-to-t from-teal-600 to-teal-300 rounded-t-lg transition-all" :style="{ height: `${Math.max(4, (d.qty / consumptionMax) * 100)}%` }" />
+            <span class="text-[8px] text-slate-400 font-bold" dir="ltr">{{ toFa(d.date.slice(5)) }}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== تب رزروها (فاز ۳) ===== -->
+    <div v-if="tab === 'reservations'" class="space-y-4">
+      <div class="bg-white rounded-2xl border border-slate-200 p-4 flex items-center gap-3">
+        <div class="p-3 bg-sky-50 text-sky-700 rounded-2xl"><Clock class="w-6 h-6" /></div>
+        <div class="flex-1">
+          <h2 class="text-base font-black text-slate-900">گزارش رزروهای انبار</h2>
+          <p class="text-[11px] text-slate-500">رزروهای فعال، منقضی‌شده و تاریخچه تصمیمات</p>
+        </div>
+        <span class="text-[11px] font-black text-sky-700 bg-sky-50 border border-sky-200 px-2.5 py-1 rounded-full">{{ toFa(reservationsRep.active.length) }} فعال</span>
+      </div>
+
+      <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+        <table class="w-full text-right text-xs">
+          <thead class="bg-slate-50 font-black text-slate-700 border-b border-slate-200">
+            <tr>
+              <th class="p-3">برنامه (تاریخ)</th><th class="p-3 text-center">اقلام</th>
+              <th class="p-3">رزروکننده</th><th class="p-3">زمان رزرو</th>
+              <th class="p-3 text-center">وضعیت</th><th class="p-3 text-center">مهلت باقی‌مانده</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100">
+            <EmptyRow v-if="reservationsRep.all.length === 0" :col-span="6" text="رزروی ثبت نشده" />
+            <tr v-for="r in reservationsRep.all" v-else :key="r.id" class="hover:bg-slate-50">
+              <td class="p-3 font-bold text-slate-800">{{ faDatePretty(r.date) }}</td>
+              <td class="p-3 text-center">{{ toFa(r.items) }}</td>
+              <td class="p-3">{{ r.reservedBy }}</td>
+              <td class="p-3 text-slate-500">{{ toFa(r.reservedAt) || '—' }}</td>
+              <td class="p-3 text-center">
+                <span class="px-2 py-1 rounded-full text-[9px] font-black" :class="planStatusMeta(r.status).cls">{{ planStatusMeta(r.status).label }}</span>
+                <span v-if="r.expired" class="block text-[9px] text-rose-600 font-bold mt-0.5">منقضی — آزادسازی خودکار</span>
+              </td>
+              <td class="p-3 text-center font-black tabular-nums" :class="r.hoursLeft !== null && r.hoursLeft <= 3 ? 'text-rose-600' : 'text-sky-700'">
+                {{ r.hoursLeft !== null ? `${toFa(r.hoursLeft)} ساعت` : '—' }}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ===== تب FIFO و انقضا (فاز ۳) ===== -->
+    <div v-if="tab === 'fifo'" class="space-y-4">
+      <div class="bg-white rounded-2xl border border-slate-200 p-4 flex items-center gap-3">
+        <div class="p-3 bg-amber-50 text-amber-700 rounded-2xl"><PackageSearch class="w-6 h-6" /></div>
+        <div class="flex-1">
+          <h2 class="text-base font-black text-slate-900">FIFO و اقلام نزدیک به انقضا</h2>
+          <p class="text-[11px] text-slate-500">بر اساس بچ‌های ثبت‌شده در رسیدهای انبار (GRN) — نیازمند فعال بودن «ردیابی بچ» و «ردیابی انقضا» در تنظیمات</p>
+        </div>
+      </div>
+
+      <div v-if="!store.settings.enableExpiryTracking" class="bg-amber-50 border border-amber-200 rounded-2xl p-4 text-xs font-bold text-amber-900">
+        ردیابی انقضا غیرفعال است — از تنظیمات ← ماژول خرید فعال کنید.
+      </div>
+      <div v-else-if="expiryLots.length === 0" class="bg-white border border-dashed border-slate-300 rounded-3xl p-12 text-center text-slate-400 text-xs font-bold">بچ انقضاداری ثبت نشده است</div>
+      <div v-else class="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+        <table class="w-full text-right text-xs">
+          <thead class="bg-slate-50 font-black text-slate-700 border-b border-slate-200">
+            <tr>
+              <th class="p-3">ماده</th><th class="p-3">بچ</th><th class="p-3">رسید</th>
+              <th class="p-3">تاریخ رسید</th><th class="p-3 text-center">مقدار</th>
+              <th class="p-3">انقضا</th><th class="p-3 text-center">روز تا انقضا</th><th class="p-3 text-center">وضعیت</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100">
+            <tr v-for="l in expiryLots" :key="l.grnId + l.batchNo" class="hover:bg-slate-50" :class="l.daysToExpiry <= 2 ? 'bg-rose-50/50' : l.daysToExpiry <= 7 ? 'bg-amber-50/40' : ''">
+              <td class="p-3 font-bold text-slate-800">{{ l.name }}</td>
+              <td class="p-3" dir="ltr">{{ l.batchNo }}</td>
+              <td class="p-3 text-slate-500" dir="ltr">{{ l.grnId }}</td>
+              <td class="p-3">{{ toFa(l.grnDate) }}</td>
+              <td class="p-3 text-center">{{ toFa(l.receivedQty) }} {{ l.unit }}</td>
+              <td class="p-3" dir="ltr">{{ toFa(l.expiryDate) }}</td>
+              <td class="p-3 text-center font-black" :class="l.daysToExpiry <= 0 ? 'text-rose-700' : l.daysToExpiry <= 7 ? 'text-amber-700' : 'text-slate-600'">{{ toFa(l.daysToExpiry) }}</td>
+              <td class="p-3 text-center">
+                <span class="px-2 py-1 rounded-full text-[9px] font-black" :class="l.daysToExpiry <= 0 ? 'bg-rose-100 text-rose-700' : l.daysToExpiry <= 2 ? 'bg-rose-50 text-rose-600' : l.daysToExpiry <= 7 ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'">
+                  {{ l.daysToExpiry <= 0 ? 'منقضی' : l.daysToExpiry <= 2 ? 'بحرانی' : l.daysToExpiry <= 7 ? 'نزدیک' : 'سالم' }}
+                </span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ===== تب کارایی تأمین‌کنندگان (فاز ۳) ===== -->
+    <div v-if="tab === 'suppliers'" class="space-y-4">
+      <div class="bg-white rounded-2xl border border-slate-200 p-4 flex items-center gap-3">
+        <div class="p-3 bg-emerald-50 text-emerald-700 rounded-2xl"><TrendingUp class="w-6 h-6" /></div>
+        <div class="flex-1">
+          <h2 class="text-base font-black text-slate-900">کارایی تأمین‌کنندگان</h2>
+          <p class="text-[11px] text-slate-500">نرخ تکمیل سفارش، تحویل به‌موقع، سازگاری فاکتورها و جمع خرید</p>
+        </div>
+      </div>
+
+      <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+        <table class="w-full text-right text-xs">
+          <thead class="bg-slate-50 font-black text-slate-700 border-b border-slate-200">
+            <tr>
+              <th class="p-3">تأمین‌کننده</th>
+              <th class="p-3 text-center">سفارش‌ها</th>
+              <th class="p-3 text-center">نرخ تکمیل</th>
+              <th class="p-3 text-center">تحویل به‌موقع</th>
+              <th class="p-3 text-center">سازگاری فاکتور</th>
+              <th class="p-3 text-left">جمع خرید</th>
+              <th class="p-3 text-center">ارزیابی</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100">
+            <EmptyRow v-if="supplierPerf.length === 0" :col-span="7" text="تأمین‌کننده‌ای ثبت نشده" />
+            <tr v-for="s in supplierPerf" v-else :key="s.id" class="hover:bg-slate-50">
+              <td class="p-3 font-bold text-slate-800">{{ s.name }}<span v-if="!s.active" class="mr-1.5 text-[9px] text-slate-400">(غیرفعال)</span></td>
+              <td class="p-3 text-center">{{ toFa(s.poCount) }}</td>
+              <td class="p-3 text-center font-black">{{ s.fulfillmentRate === null ? '—' : `${toFa(s.fulfillmentRate)}٪` }}</td>
+              <td class="p-3 text-center font-black" :class="s.onTimeRate !== null && s.onTimeRate < 60 ? 'text-rose-600' : 'text-emerald-600'">{{ s.onTimeRate === null ? '—' : `${toFa(s.onTimeRate)}٪` }}</td>
+              <td class="p-3 text-center font-black" :class="s.matchRate !== null && s.matchRate < 70 ? 'text-rose-600' : 'text-emerald-600'">{{ s.matchRate === null ? '—' : `${toFa(s.matchRate)}٪` }}</td>
+              <td class="p-3 text-left font-black tabular-nums">{{ formatMoney(s.totalPurchases) }}</td>
+              <td class="p-3 text-center">
+                <span v-if="s.poCount === 0" class="text-slate-400 text-[10px]">—</span>
+                <span v-else class="px-2 py-1 rounded-full text-[9px] font-black" :class="(s.fulfillmentRate || 0) >= 80 && (s.matchRate || 0) >= 80 ? 'bg-emerald-100 text-emerald-700' : (s.fulfillmentRate || 0) >= 50 ? 'bg-amber-100 text-amber-700' : 'bg-rose-100 text-rose-700'">
+                  {{ (s.fulfillmentRate || 0) >= 80 && (s.matchRate || 0) >= 80 ? 'عالی' : (s.fulfillmentRate || 0) >= 50 ? 'متوسط' : 'ضعیف' }}
+                </span>
+              </td>
             </tr>
           </tbody>
         </table>
